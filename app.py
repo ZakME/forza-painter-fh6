@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from tkinter import BOTH, END, LEFT, RIGHT, X, Button, Canvas, Checkbutton, Entry, Frame, Label, Listbox, PhotoImage, StringVar, Text, Tk, filedialog, ttk
 
@@ -46,14 +47,16 @@ TEXT = {
         "custom_random": "Random samples",
         "custom_mutated": "Mutated samples",
         "custom_save_at": "Save checkpoints",
+        "custom_panel_title": "Custom settings",
+        "custom_panel_hint": "The selected preset fills these values. Enable custom settings if you want to edit them before generating.",
         "generate_step_image": "Step 1 - Choose images",
         "generate_step_image_hint": "Add PNG/JPG/BMP images. Generated JSON is saved beside each source image.",
         "generate_step_quality": "Step 2 - Choose quality",
         "generate_step_quality_hint": "Fast profiles are quicker. Slow profiles use more GPU time and usually look cleaner.",
         "generate_step_run": "Step 3 - Generate",
         "generate_step_run_hint": "Click once and wait. Progress appears in Logs; generated JSON is added to the Import page automatically.",
-        "scroll_hint": "Scroll this panel for more settings. Generate button stays below.",
-        "start_generate": "Start generating",
+        "scroll_hint": "Add image, choose a preset, then adjust custom settings if needed.",
+        "start_generate": "Generate with current settings",
         "open_output": "Open output folder",
         "preview": "Preview",
         "preview_hint": "Select an image or JSON to preview it here.",
@@ -146,14 +149,16 @@ Notes
         "custom_random": "随机样本",
         "custom_mutated": "变异样本",
         "custom_save_at": "保存节点",
+        "custom_panel_title": "自定义参数",
+        "custom_panel_hint": "上方预设会自动填入这些参数；勾选使用自定义参数后可直接修改。",
         "generate_step_image": "第 1 步 - 选择图片",
         "generate_step_image_hint": "添加 PNG/JPG/BMP 图片。生成的 JSON 会保存在原图片旁边。",
         "generate_step_quality": "第 2 步 - 选择品质",
         "generate_step_quality_hint": "快速配置耗时短；慢速配置会占用更多 GPU 时间，通常画面更干净。",
         "generate_step_run": "第 3 步 - 开始生成",
         "generate_step_run_hint": "点击一次后等待。进度会显示在日志里，生成的 JSON 会自动加入导入页面。",
-        "scroll_hint": "此面板可滚动查看更多设置。生成按钮固定在下方。",
-        "start_generate": "开始生成",
+        "scroll_hint": "添加图片、选择预设；需要时直接修改下方自定义参数。",
+        "start_generate": "按当前配置生成",
         "open_output": "打开输出目录",
         "preview": "预览",
         "preview_hint": "选择图片或 JSON 后会在这里预览。",
@@ -393,7 +398,6 @@ class App:
         self.outputs = []
         self.processes = []
         self.photo = None
-        self.profile_buttons = []
         self.use_custom_settings = StringVar(value="0")
         self.custom_stop_at = StringVar()
         self.custom_max_resolution = StringVar()
@@ -420,6 +424,19 @@ class App:
             self._update_setting_description()
         self._render_lists()
         self._poll_queue()
+
+    def _configure_styles(self):
+        style = ttk.Style(self.root)
+        style.configure(
+            "Primary.TNotebook.Tab",
+            padding=(18, 8),
+            font=("Segoe UI", 10, "bold"),
+        )
+        style.map(
+            "Primary.TNotebook.Tab",
+            background=[("selected", "#d8e8ff"), ("active", "#eef5ff")],
+            foreground=[("selected", "#003b73"), ("active", "#003b73")],
+        )
 
     def _register_process(self, proc):
         with self.process_lock:
@@ -476,6 +493,7 @@ class App:
         return widget
 
     def _build(self):
+        self._configure_styles()
         header = Frame(self.root)
         header.pack(fill=X, padx=14, pady=(12, 6))
         title_box = Frame(header)
@@ -498,7 +516,7 @@ class App:
         self._button(process_bar, "refresh", self.refresh_processes).pack(side=LEFT)
         Label(process_bar, textvariable=self.status, anchor="e").pack(side=RIGHT)
 
-        self.tabs = ttk.Notebook(self.root)
+        self.tabs = ttk.Notebook(self.root, style="Primary.TNotebook")
         self.tabs.pack(fill=BOTH, expand=True, padx=14, pady=(0, 8))
         self.generate_tab = Frame(self.tabs)
         self.import_tab = Frame(self.tabs)
@@ -521,11 +539,13 @@ class App:
         right.pack(side=RIGHT, fill=BOTH, expand=True, pady=10)
 
         self._label(left_outer, "scroll_hint", anchor="w", justify=LEFT, fg="#8a5300").pack(fill=X, pady=(0, 6))
-        left_canvas = Canvas(left_outer, highlightthickness=0)
-        left_scroll = ttk.Scrollbar(left_outer, orient="vertical", command=left_canvas.yview)
+        scroll_area = Frame(left_outer)
+        scroll_area.pack(fill=BOTH, expand=True, pady=(0, 8))
+        left_canvas = Canvas(scroll_area, highlightthickness=0)
+        left_scroll = ttk.Scrollbar(scroll_area, orient="vertical", command=left_canvas.yview)
         left_canvas.configure(yscrollcommand=left_scroll.set)
-        left_canvas.pack(side=LEFT, fill=BOTH, expand=True, pady=(0, 8))
-        left_scroll.pack(side=RIGHT, fill="y", pady=(0, 8))
+        left_canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        left_scroll.pack(side=RIGHT, fill="y")
         left = Frame(left_canvas)
         left_window = left_canvas.create_window((0, 0), window=left, anchor="nw")
 
@@ -538,53 +558,62 @@ class App:
         def _mousewheel(event):
             left_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
+        def _bind_mousewheel(_event=None):
+            left_canvas.bind_all("<MouseWheel>", _mousewheel)
+
+        def _unbind_mousewheel(_event=None):
+            left_canvas.unbind_all("<MouseWheel>")
+
         left.bind("<Configure>", _update_scroll_region)
         left_canvas.bind("<Configure>", _match_canvas_width)
-        left_canvas.bind("<MouseWheel>", _mousewheel)
-        left.bind("<MouseWheel>", _mousewheel)
+        scroll_area.bind("<Enter>", _bind_mousewheel)
+        scroll_area.bind("<Leave>", _unbind_mousewheel)
 
         step1 = ttk.LabelFrame(left, text=tr(self.lang, "generate_step_image"))
         self.translated.append((step1, "generate_step_image", "text"))
-        step1.pack(fill=X, pady=(0, 10))
-        self._label(step1, "generate_step_image_hint", anchor="w", justify=LEFT, wraplength=540).pack(fill=X, padx=10, pady=(8, 4))
+        step1.pack(fill=X, pady=(0, 6))
         row = Frame(step1)
-        row.pack(fill=X, padx=10)
+        row.pack(fill=X, padx=10, pady=(6, 2))
         self._label(row, "images").pack(side=LEFT)
         self._button(row, "add_images", self.add_images).pack(side=RIGHT)
-        self.image_list = Listbox(step1, height=7)
-        self.image_list.pack(fill=X, padx=10, pady=(6, 10))
+        self.image_list = Listbox(step1, height=3)
+        self.image_list.pack(fill=X, padx=10, pady=(2, 8))
         self.image_list.bind("<<ListboxSelect>>", self._preview_selected_image)
 
         step2 = ttk.LabelFrame(left, text=tr(self.lang, "generate_step_quality"))
         self.translated.append((step2, "generate_step_quality", "text"))
-        step2.pack(fill=X, pady=(0, 10))
-        self._label(step2, "generate_step_quality_hint", anchor="w", justify=LEFT, wraplength=540).pack(fill=X, padx=10, pady=(8, 4))
-        self.profile_button_frame = Frame(step2)
-        self.profile_button_frame.pack(fill=X, padx=10, pady=(6, 4))
-        for item in self.settings:
-            button = ttk.Radiobutton(
-                self.profile_button_frame,
-                text=item["label"],
-                value=item["label"],
-                variable=self.selected_profile,
-                command=self._update_setting_description,
-            )
-            button.pack(anchor="w", pady=2)
-            self.profile_buttons.append(button)
+        step2.pack(fill=X, pady=(0, 6))
+        profile_row = Frame(step2)
+        profile_row.pack(fill=X, padx=10, pady=(8, 4))
+        self._label(profile_row, "quality").pack(side=LEFT)
+        self.profile_combo = ttk.Combobox(
+            profile_row,
+            values=[item["label"] for item in self.settings],
+            textvariable=self.selected_profile,
+            state="readonly",
+            width=32,
+        )
+        self.profile_combo.pack(side=LEFT, fill=X, expand=True, padx=(8, 0))
+        self.profile_combo.bind("<<ComboboxSelected>>", self._update_setting_description)
         self.setting_description = Label(step2, text="", anchor="w", justify=LEFT, wraplength=500)
-        self.setting_description.pack(fill=X, padx=10, pady=(0, 10))
+        self.setting_description.pack(fill=X, padx=10, pady=(0, 8))
+
+        custom_section = ttk.LabelFrame(left, text=tr(self.lang, "custom_panel_title"))
+        self.translated.append((custom_section, "custom_panel_title", "text"))
+        custom_section.pack(fill=X, pady=(0, 6))
+        self._label(custom_section, "custom_panel_hint", anchor="w", justify=LEFT, wraplength=540, fg="#005a9e").pack(fill=X, padx=10, pady=(6, 2))
         custom_toggle = Checkbutton(
-            step2,
+            custom_section,
             text=tr(self.lang, "custom_settings"),
             variable=self.use_custom_settings,
             onvalue="1",
             offvalue="0",
             command=self._sync_custom_state,
         )
-        custom_toggle.pack(anchor="w", padx=10, pady=(0, 4))
+        custom_toggle.pack(anchor="w", padx=10, pady=(0, 2))
         self.translated.append((custom_toggle, "custom_settings", "text"))
-        custom_grid = Frame(step2)
-        custom_grid.pack(fill=X, padx=10, pady=(0, 10))
+        custom_grid = Frame(custom_section)
+        custom_grid.pack(fill=X, padx=10, pady=(0, 6))
         self.custom_fields = []
         custom_specs = [
             ("custom_layers", self.custom_stop_at),
@@ -595,9 +624,9 @@ class App:
         ]
         for row_index, (key, variable) in enumerate(custom_specs):
             label = self._label(custom_grid, key, anchor="w")
-            label.grid(row=row_index, column=0, sticky="w", pady=2, padx=(0, 8))
+            label.grid(row=row_index, column=0, sticky="w", pady=1, padx=(0, 8))
             entry = Entry(custom_grid, textvariable=variable, width=18)
-            entry.grid(row=row_index, column=1, sticky="ew", pady=2)
+            entry.grid(row=row_index, column=1, sticky="ew", pady=1)
             self.custom_fields.append(entry)
         custom_grid.columnconfigure(1, weight=1)
         self._sync_custom_state()
@@ -739,7 +768,7 @@ class App:
         self.tutorial_text.insert(END, tr(self.lang, "tutorial"))
         self.tutorial_text.config(state="disabled")
 
-    def _update_setting_description(self):
+    def _update_setting_description(self, _event=None):
         item = self._selected_setting()
         self.setting_description.config(text=item["description"] if item else "No settings profiles found.")
         if item and self.use_custom_settings.get() != "1":
@@ -796,7 +825,8 @@ class App:
             self.json_list.insert(END, str(path))
 
     def log_line(self, message):
-        self.log.insert(END, f"[{time.strftime('%H:%M:%S')}] {message}\n")
+        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        self.log.insert(END, f"[{timestamp}] {message}\n")
         self.log.see(END)
 
     def friendly_generator_line(self, line):
