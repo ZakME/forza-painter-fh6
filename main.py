@@ -6,7 +6,6 @@
 # Year: 2022
 
 import sys
-import json
 import argparse
 import ctypes, sys
 import psutil
@@ -18,6 +17,7 @@ import subprocess
 from native import *
 from internal_classes import *
 from game_profiles import iter_profiles, PROFILES
+from geometry_json import RECTANGLE, ROTATED_ELLIPSE, load_normalized_geometry
 import colorsys
 import os
 
@@ -204,25 +204,11 @@ def load_geometry(
     layer_table_address=None,
     layer_count_value=None,
 ):
-    with open(path) as f:
-        # load our json
-        try:
-            data = json.load(f)
-            # Validate the loaded json
-            try:
-                valid = len(data['shapes'][0]['data']) == 4
-                print(data['shapes'][0]['type'])
-                valid = valid and data['shapes'][0]['type'] > 0
-                valid = valid and len(data['shapes'][0]['color']) == 4
-                if not valid:
-                    print("Not a valid generated geometry .json file")
-                    return
-            except:
-                print("Not a valid generated geometry .json file")
-                return
-        except:
-            print("Not a valid .json file")
-            return
+    try:
+        data = load_normalized_geometry(path)
+    except Exception as exc:
+        print("Not a valid generated geometry .json file: {}".format(exc))
+        return
 
     # validation and build our collection of shapes
     image_w, image_h = data['shapes'][0]['data'][2:]
@@ -240,16 +226,16 @@ def load_geometry(
         #shape.data = [x,y,w,h,rot_deg]
         if len(shape.get('color', [])) == 4 and int(shape['color'][3]) <= 0:
             continue
-        # Currently only supporting rotated ellipsis
-        if shape['type'] == 16:
-            # Rotated ellipsis
+        if shape['type'] == ROTATED_ELLIPSE:
             x,y,w,h,rot_deg = shape['data']
             r,g,b,a = shape['color']
             shapes.append(Shape(shape['type'], x, y, w, h, rot_deg, Color(r,g,b,a), False))
+        elif shape['type'] == RECTANGLE:
+            x,y,w,h = shape['data']
+            r,g,b,a = shape['color']
+            shapes.append(Shape(shape['type'], x, y, w, h, 0, Color(r,g,b,a), False))
         else:
-            # Not handling other shapes currently
-            print("Unsupported shape in geometry file.\nCurrently only supporting rotated ellipsis.")
-            return
+            print("Skipping unsupported shape type {}.".format(shape.get("type")))
     if len(shapes) == 0:
         print("No shapes were loaded. Check your exported geometry .json")
         return
@@ -265,7 +251,14 @@ def load_geometry(
         for shape in shapes:
             if shape.color.a <= 0:
                 continue
-            preview = cv2.ellipse(preview, (shape.x, shape.y), (shape.h,shape.w), -90 + shape.rot_deg, 0., 360, (shape.color.b, shape.color.g, shape.color.r), thickness=-1)
+            if shape.type_id == ROTATED_ELLIPSE:
+                preview = cv2.ellipse(preview, (shape.x, shape.y), (shape.h,shape.w), -90 + shape.rot_deg, 0., 360, (shape.color.b, shape.color.g, shape.color.r), thickness=-1)
+            elif shape.type_id == RECTANGLE:
+                x0 = int(round(shape.x - shape.w / 2))
+                y0 = int(round(shape.y - shape.h / 2))
+                x1 = int(round(shape.x + shape.w / 2))
+                y1 = int(round(shape.y + shape.h / 2))
+                preview = cv2.rectangle(preview, (x0, y0), (x1, y1), (shape.color.b, shape.color.g, shape.color.r), thickness=-1)
 
         if preview_enabled:
             print("Here is a preview of your image, click it then press any key to start!")

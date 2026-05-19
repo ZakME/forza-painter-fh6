@@ -121,6 +121,11 @@ check_environment.bat
 
 ## 更新日志
 
+### 2026-05-19
+
+- GPU/OpenCL 生成器更新到上游 canary 版本，改善透明 PNG 边缘和大块图层外溢问题。
+- 导入和预览会先规范化 geometry JSON，兼容旧版 forza-painter 常见 JSON 字段格式。
+
 ### 2026-05-18
 
 - 生成 JSON 改用 GPU/OpenCL 生成器，减少旧生成器带来的伪影问题。

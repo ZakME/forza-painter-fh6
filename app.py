@@ -13,6 +13,7 @@ from tkinter import BOTH, END, LEFT, RIGHT, X, Button, Canvas, Checkbutton, Entr
 import psutil
 
 from game_profiles import PROFILES
+from geometry_json import RECTANGLE, ROTATED_ELLIPSE, load_normalized_geometry
 from generator_backend import GENERATOR_EXE, best_geometry_jsons, build_generator_command, generated_jsons, generated_preview_files, generator_preview_path, load_settings, write_custom_settings
 
 
@@ -337,7 +338,7 @@ def render_geometry_json(path):
         return None
     cv2, np = loaded
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        data = load_normalized_geometry(path)
         shapes = data["shapes"]
         image_w, image_h = [int(v) for v in shapes[0]["data"][2:]]
         bg_r, bg_g, bg_b, bg_a = [int(v) for v in shapes[0]["color"]]
@@ -355,13 +356,20 @@ def render_geometry_json(path):
             color = [int(v) for v in shape.get("color", [])]
             if len(color) == 4 and color[3] <= 0:
                 continue
-            if int(shape.get("type", 0)) != 16:
-                continue
-            x, y, w, h, rot_deg = shape["data"]
             r, g, b, _a = color
-            center = (int(round(x)), int(round(y)))
-            axes = (max(1, int(round(h))), max(1, int(round(w))))
-            preview = cv2.ellipse(preview, center, axes, -90 + float(rot_deg), 0.0, 360.0, (b, g, r), thickness=-1)
+            shape_type = int(shape.get("type", 0))
+            if shape_type == ROTATED_ELLIPSE:
+                x, y, w, h, rot_deg = shape["data"]
+                center = (int(round(x)), int(round(y)))
+                axes = (max(1, int(round(h))), max(1, int(round(w))))
+                preview = cv2.ellipse(preview, center, axes, -90 + float(rot_deg), 0.0, 360.0, (b, g, r), thickness=-1)
+            elif shape_type == RECTANGLE:
+                x, y, w, h = shape["data"]
+                x0 = int(round(x - w / 2))
+                y0 = int(round(y - h / 2))
+                x1 = int(round(x + w / 2))
+                y1 = int(round(y + h / 2))
+                preview = cv2.rectangle(preview, (x0, y0), (x1, y1), (b, g, r), thickness=-1)
         return image_to_photo(preview)
     except Exception:
         return None

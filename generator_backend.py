@@ -1,6 +1,8 @@
 from pathlib import Path
 import re
 
+from geometry_json import drawable_shape_count
+
 
 ROOT = Path(__file__).resolve().parent
 SETTINGS_DIR = ROOT / "settings"
@@ -95,22 +97,7 @@ def generated_jsons(image_path):
 
 
 def geometry_shape_count(path):
-    try:
-        import json
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-        shapes = data.get("shapes", [])
-        if not shapes:
-            return 0
-        count = 0
-        for shape in shapes[1:]:
-            color = shape.get("color", [])
-            if len(color) == 4 and int(color[3]) <= 0:
-                continue
-            if int(shape.get("type", 0)) == 16:
-                count += 1
-        return count
-    except Exception:
-        return 0
+    return drawable_shape_count(path)
 
 
 def best_geometry_jsons(paths):

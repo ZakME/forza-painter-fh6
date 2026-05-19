@@ -143,6 +143,11 @@ The app locates and verifies the current FH6 layer table before writing. If the 
 
 ## Changelog
 
+### 2026-05-19
+
+- The GPU/OpenCL generator was updated to the upstream canary build to improve transparent PNG edges and large overhang artifacts.
+- Import and preview now normalize geometry JSON first, improving compatibility with common legacy forza-painter JSON field formats.
+
 ### 2026-05-18
 
 - JSON generation now uses the bundled GPU/OpenCL generator to reduce artifacts from the old generator.
