@@ -466,6 +466,16 @@ class App:
         with self.process_lock:
             self.active_processes.add(proc)
 
+    def _popen_registered(self, cmd, **kwargs):
+        # Hold process_lock across Popen + registration so on_close cannot miss
+        # a child process that starts while the window is closing.
+        with self.process_lock:
+            if self.shutdown_event.is_set() or self.closed:
+                return None
+            proc = subprocess.Popen(cmd, **kwargs)
+            self.active_processes.add(proc)
+            return proc
+
     def _unregister_process(self, proc):
         with self.process_lock:
             self.active_processes.discard(proc)
@@ -1159,7 +1169,10 @@ class App:
                 flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
                 cmd = build_generator_command(image_path, setting)
                 self.queue.put(("log", f"Running GPU generator with {setting['path'].name}"))
-                proc = subprocess.Popen(
+                if self.shutdown_event.is_set():
+                    self.queue.put(("status", tr(self.lang, "stopped")))
+                    return
+                proc = self._popen_registered(
                     cmd,
                     cwd=ROOT,
                     stdout=subprocess.PIPE,
@@ -1170,7 +1183,9 @@ class App:
                     errors="replace",
                     creationflags=flags,
                 )
-                self._register_process(proc)
+                if proc is None:
+                    self.queue.put(("status", tr(self.lang, "stopped")))
+                    return
                 with self.generation_lock:
                     self.current_generator_proc = proc
 
@@ -1273,7 +1288,9 @@ class App:
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         env = os.environ.copy()
         env.update({"FORZA_PAINTER_NO_ELEVATE": "1", "FORZA_PAINTER_NO_PAUSE": "1"})
-        proc = subprocess.Popen(
+        if self.shutdown_event.is_set():
+            return 130
+        proc = self._popen_registered(
             [str(x) for x in cmd],
             cwd=ROOT,
             stdout=subprocess.PIPE,
@@ -1284,7 +1301,8 @@ class App:
             creationflags=flags,
             env=env,
         )
-        self._register_process(proc)
+        if proc is None:
+            return 130
         started = time.time()
         try:
             while True:

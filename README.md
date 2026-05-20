@@ -147,6 +147,17 @@ The app locates and verifies the current FH6 layer table before writing. If the 
 
 ## Changelog
 
+### v1.1.1 / 2026-05-20
+
+- Added centralized version management. The window title, command-line `--version`, and release package name now use `v1.1.1`.
+- Reorganized the repository layout: source code moved to `src/`, the generator moved to `bin/`, presets moved to `config/settings/`, and release scripts moved to `scripts/`.
+- Updated the release script to build `forza-painter-fh6-v1.1.1.zip` and exclude caches, logs, and `__pycache__`.
+- Merged license notices into the root `LICENSE`, including the bundled GPU/OpenCL generator notice.
+- Added a `Stop current generation` button so the current GPU generator can be stopped safely.
+- Added ETA display for generation progress, using rolling speed and smoothing to avoid large ETA jumps.
+- Fixed a shutdown issue where the GPU generator could keep running after the app window was closed.
+- Retuned bundled quality presets with clearer layer, random sample, and resolution tiers; added the `I hate my GPU` heavy preset.
+
 ### 2026-05-19
 
 - The GPU/OpenCL generator was updated to the upstream canary build to improve transparent PNG edges and large overhang artifacts.
