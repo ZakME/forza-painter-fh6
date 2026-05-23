@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.5.4 / 2026-05-23
+
+- Fixed preview scaling for high-resolution source images, generator preview PNG files, and JSON previews.
+- Previews now adapt to the current preview panel size while preserving the original image aspect ratio, avoiding stretched or partially visible previews when using large max-resolution settings such as 3000.
+- Fixed JSON preview rendering for type 16 rotated ellipses in the packaged EXE by making the Pillow fallback follow the historical OpenCV preview coordinate conversion.
+
 ## v1.5.3 / 2026-05-22
 
 - Added user preset import for the one-file EXE; imported `.ini` presets are stored in the external `config/settings/` folder beside the app.

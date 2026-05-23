@@ -1,6 +1,7 @@
 import argparse
 import io
 import json
+import math
 import os
 import platform
 import queue
@@ -633,78 +634,110 @@ def load_pillow():
         return None
 
 
-def resize_keep_aspect(image, max_size=PREVIEW_MAX):
+def preview_size_tuple(max_size=None):
+    if max_size is None:
+        return PREVIEW_MAX, PREVIEW_MAX
+    if isinstance(max_size, (tuple, list)):
+        if len(max_size) >= 2:
+            width, height = max_size[0], max_size[1]
+        elif len(max_size) == 1:
+            width = height = max_size[0]
+        else:
+            width = height = PREVIEW_MAX
+    else:
+        width = height = max_size
+    try:
+        width = int(width)
+        height = int(height)
+    except (TypeError, ValueError):
+        width = height = PREVIEW_MAX
+    return max(1, width), max(1, height)
+
+
+def preview_scale(width, height, max_size=None):
+    max_w, max_h = preview_size_tuple(max_size)
+    if width <= 0 or height <= 0:
+        return 1.0
+    return min(max_w / width, max_h / height, 1.0)
+
+
+def resize_keep_aspect(image, max_size=None):
     loaded = load_cv2()
     if not loaded:
         return image
     cv2, _np = loaded
     height, width = image.shape[:2]
-    scale = min(max_size / max(width, height), 1.0)
+    scale = preview_scale(width, height, max_size)
     if scale < 1.0:
-        image = cv2.resize(image, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA)
+        resized_w = max(1, int(round(width * scale)))
+        resized_h = max(1, int(round(height * scale)))
+        image = cv2.resize(image, (resized_w, resized_h), interpolation=cv2.INTER_AREA)
     return image
 
 
-def image_to_photo(image):
+def image_to_photo(image, max_size=None):
     loaded = load_cv2()
     if not loaded:
         return None
     cv2, _np = loaded
-    image = resize_keep_aspect(image)
+    image = resize_keep_aspect(image, max_size)
     ok, encoded = cv2.imencode(".png", image)
     if not ok:
         return None
     return encoded.tobytes()
 
 
-def pil_to_photo(image):
+def pil_to_photo(image, max_size=None):
     loaded = load_pillow()
     if not loaded:
         return None
     Image, _ImageDraw = loaded
     image = image.convert("RGB")
-    image.thumbnail((PREVIEW_MAX, PREVIEW_MAX), Image.Resampling.LANCZOS)
+    image.thumbnail(preview_size_tuple(max_size), Image.Resampling.LANCZOS)
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     return buffer.getvalue()
 
 
-def render_source_image(path):
+def render_source_image(path, max_size=None):
     loaded = load_cv2()
     if loaded:
         cv2, _np = loaded
         image = cv2.imread(str(path), cv2.IMREAD_COLOR)
         if image is not None:
-            return image_to_photo(image)
+            return image_to_photo(image, max_size)
     loaded = load_pillow()
     if not loaded:
         return None
     Image, _ImageDraw = loaded
     try:
         with Image.open(path) as image:
-            return pil_to_photo(image)
+            return pil_to_photo(image, max_size)
     except Exception:
         return None
 
 
-def render_geometry_json(path):
+def render_geometry_json(path, max_size=None):
     loaded = load_cv2()
     if not loaded:
-        return render_geometry_json_pillow(path)
+        return render_geometry_json_pillow(path, max_size)
     cv2, np = loaded
     try:
         data = load_normalized_geometry(path)
         shapes = data["shapes"]
         image_w, image_h = [int(v) for v in shapes[0]["data"][2:]]
         bg_r, bg_g, bg_b, bg_a = [int(v) for v in shapes[0]["color"]]
-        preview = np.zeros((image_h, image_w, 3), np.uint8)
+        scale = preview_scale(image_w, image_h, max_size)
+        preview_w = max(1, int(round(image_w * scale)))
+        preview_h = max(1, int(round(image_h * scale)))
+        preview = np.zeros((preview_h, preview_w, 3), np.uint8)
         if bg_a > 0:
             preview[:, :] = (bg_b, bg_g, bg_r)
         else:
             preview[:, :] = (38, 38, 38)
-            tile = 32
-            for y in range(0, image_h, tile):
-                for x in range(0, image_w, tile):
+            tile = max(8, int(round(32 * scale)))
+            for y in range(0, preview_h, tile):
+                for x in range(0, preview_w, tile):
                     if ((x // tile) + (y // tile)) % 2 == 0:
                         preview[y:y + tile, x:x + tile] = (58, 58, 58)
         for shape in shapes[1:]:
@@ -715,22 +748,26 @@ def render_geometry_json(path):
             shape_type = int(shape.get("type", 0))
             if shape_type == ROTATED_ELLIPSE:
                 x, y, w, h, rot_deg = shape["data"]
-                center = (int(round(x)), int(round(y)))
-                axes = (max(1, int(round(h))), max(1, int(round(w))))
+                center = (int(round(float(x) * scale)), int(round(float(y) * scale)))
+                axes = (max(1, int(round(float(h) * scale))), max(1, int(round(float(w) * scale))))
                 preview = cv2.ellipse(preview, center, axes, -90 + float(rot_deg), 0.0, 360.0, (b, g, r), thickness=-1)
             elif shape_type == RECTANGLE:
                 x, y, w, h = shape["data"]
-                x0 = int(round(x - w / 2))
-                y0 = int(round(y - h / 2))
-                x1 = int(round(x + w / 2))
-                y1 = int(round(y + h / 2))
+                x = float(x)
+                y = float(y)
+                w = float(w)
+                h = float(h)
+                x0 = int(round((x - w / 2) * scale))
+                y0 = int(round((y - h / 2) * scale))
+                x1 = int(round((x + w / 2) * scale))
+                y1 = int(round((y + h / 2) * scale))
                 preview = cv2.rectangle(preview, (x0, y0), (x1, y1), (b, g, r), thickness=-1)
-        return image_to_photo(preview)
+        return image_to_photo(preview, max_size)
     except Exception:
         return None
 
 
-def render_geometry_json_pillow(path):
+def render_geometry_json_pillow(path, max_size=None):
     loaded = load_pillow()
     if not loaded:
         return None
@@ -740,7 +777,7 @@ def render_geometry_json_pillow(path):
         shapes = data["shapes"]
         image_w, image_h = [int(v) for v in shapes[0]["data"][2:]]
         bg_r, bg_g, bg_b, bg_a = [int(v) for v in shapes[0]["color"]]
-        scale = min(PREVIEW_MAX / max(image_w, image_h), 1.0)
+        scale = preview_scale(image_w, image_h, max_size)
         preview_w = max(1, int(round(image_w * scale)))
         preview_h = max(1, int(round(image_h * scale)))
         if bg_a > 0:
@@ -769,19 +806,43 @@ def render_geometry_json_pillow(path):
                 draw.rectangle((x0, y0, x1, y1), fill=(r, g, b))
             elif shape_type == ROTATED_ELLIPSE:
                 x, y, w, h, rot_deg = [float(v) for v in shape["data"]]
-                cx = x * scale
-                cy = y * scale
-                rx = max(1, int(round(h * scale)))
-                ry = max(1, int(round(w * scale)))
-                mask = Image.new("L", (rx * 2 + 4, ry * 2 + 4), 0)
-                mask_draw = ImageDraw.Draw(mask)
-                mask_draw.ellipse((2, 2, rx * 2 + 2, ry * 2 + 2), fill=255)
-                mask = mask.rotate(-90 + rot_deg, resample=Image.Resampling.BICUBIC, expand=True)
-                colored = Image.new("RGB", mask.size, (r, g, b))
-                preview.paste(colored, (int(round(cx - mask.width / 2)), int(round(cy - mask.height / 2))), mask)
+                draw_preview_ellipse_pillow(preview, x, y, w, h, rot_deg, (r, g, b), scale)
         return pil_to_photo(preview)
     except Exception:
         return None
+
+
+def draw_preview_ellipse_pillow(image, x, y, w, h, rot_deg, color, scale):
+    # Match the historical OpenCV preview path used before the one-file EXE:
+    # cv2.ellipse(..., axes=(h, w), angle=-90+rot).
+    width, height = image.size
+    cx = float(x) * scale
+    cy = float(y) * scale
+    rx = max(float(h) * scale, 1.0)
+    ry = max(float(w) * scale, 1.0)
+    theta = (-90.0 + float(rot_deg)) * (math.pi / 180.0)
+    cos_t = math.cos(theta)
+    sin_t = math.sin(theta)
+    inv_rx2 = 1.0 / (rx * rx)
+    inv_ry2 = 1.0 / (ry * ry)
+    extent_x = math.sqrt(rx * rx * cos_t * cos_t + ry * ry * sin_t * sin_t)
+    extent_y = math.sqrt(rx * rx * sin_t * sin_t + ry * ry * cos_t * cos_t)
+    x_min = max(0, int(math.floor(cx - extent_x - 1)))
+    x_max = min(width - 1, int(math.ceil(cx + extent_x + 1)))
+    y_min = max(0, int(math.floor(cy - extent_y - 1)))
+    y_max = min(height - 1, int(math.ceil(cy + extent_y + 1)))
+    if x_min > x_max or y_min > y_max:
+        return
+    pixels = image.load()
+    r, g, b = color
+    for yy in range(y_min, y_max + 1):
+        dy = (float(yy) + 0.5) - cy
+        for xx in range(x_min, x_max + 1):
+            dx = (float(xx) + 0.5) - cx
+            xr = dx * cos_t + dy * sin_t
+            yr = -dx * sin_t + dy * cos_t
+            if xr * xr * inv_rx2 + yr * yr * inv_ry2 <= 1.0:
+                pixels[xx, yy] = (r, g, b)
 
 
 class App:
@@ -824,6 +885,8 @@ class App:
         self.detailed_log_lock = threading.Lock()
         self.detailed_log_lines = deque()
         self.detailed_log_chars = 0
+        self.current_preview_request = None
+        self.preview_resize_job = None
         self.update_state = {"status": "checking"}
         self.update_dialog = None
         self.update_check_started = False
@@ -1143,6 +1206,7 @@ class App:
         self._build_tutorial_tab()
         self._build_log()
         self._apply_dark_theme_recursive(self.root)
+        self.tabs.bind("<<NotebookTabChanged>>", self._schedule_preview_refresh)
 
     def _build_generate_tab(self):
         left_outer = Frame(self.generate_tab)
@@ -1266,6 +1330,7 @@ class App:
         self._label(right, "preview", anchor="w", font=("Segoe UI", 12, "bold")).pack(fill=X)
         self.preview_label = Label(right, text=tr(self.lang, "preview_hint"), bg="#202020", fg="#dddddd", width=60, height=24)
         self.preview_label.pack(fill=BOTH, expand=True, pady=6)
+        self.preview_label.bind("<Configure>", self._schedule_preview_refresh)
 
     def _build_import_tab(self):
         left = Frame(self.import_tab)
@@ -1331,6 +1396,7 @@ class App:
         self._label(right, "import_preview", anchor="w", font=("Segoe UI", 12, "bold")).pack(fill=X, pady=(8, 0))
         self.import_preview_label = Label(right, text=tr(self.lang, "preview_hint"), bg="#202020", fg="#dddddd", width=56, height=20)
         self.import_preview_label.pack(fill=BOTH, expand=True, pady=6)
+        self.import_preview_label.bind("<Configure>", self._schedule_preview_refresh)
 
     def _build_tools_tab(self):
         form = Frame(self.tools_tab)
@@ -2043,7 +2109,7 @@ class App:
                 self.json_files.append(path)
         self._render_lists()
         if files:
-            self.show_preview(render_geometry_json(Path(files[0])))
+            self.show_json_preview(Path(files[0]))
 
     def remove_selected_json(self):
         selection = list(self.json_list.curselection())
@@ -2075,10 +2141,64 @@ class App:
     def _preview_selected_json(self, _event=None):
         selection = self.json_list.curselection()
         if selection:
-            self.show_preview(render_geometry_json(self.json_files[selection[0]]))
+            self.show_json_preview(self.json_files[selection[0]])
+
+    def _active_preview_label(self):
+        if hasattr(self, "tabs") and hasattr(self, "import_preview_label"):
+            try:
+                if self.tabs.select() == str(self.import_tab):
+                    return self.import_preview_label
+            except Exception:
+                pass
+        return getattr(self, "preview_label", None)
+
+    def _preview_bounds(self, label=None):
+        label = label or self._active_preview_label()
+        if label is None:
+            return PREVIEW_MAX, PREVIEW_MAX
+        try:
+            self.root.update_idletasks()
+            width = label.winfo_width()
+            height = label.winfo_height()
+        except Exception:
+            width = height = 0
+        if width <= 32 or height <= 32:
+            return PREVIEW_MAX, PREVIEW_MAX
+        return max(1, width - 16), max(1, height - 16)
+
+    def _schedule_preview_refresh(self, _event=None):
+        if not self.current_preview_request or self.closed:
+            return
+        if self.preview_resize_job is not None:
+            try:
+                self.root.after_cancel(self.preview_resize_job)
+            except Exception:
+                pass
+        self.preview_resize_job = self.root.after(180, self._refresh_current_preview)
+
+    def _refresh_current_preview(self):
+        self.preview_resize_job = None
+        request = self.current_preview_request
+        if not request or self.closed:
+            return
+        kind, path = request
+        path = Path(path)
+        if not path.exists():
+            return
+        if kind == "json":
+            data = render_geometry_json(path, self._preview_bounds())
+        else:
+            data = render_source_image(path, self._preview_bounds())
+        self.show_preview(data)
+
+    def show_json_preview(self, path):
+        path = Path(path)
+        self.current_preview_request = ("json", path)
+        self.show_preview(render_geometry_json(path, self._preview_bounds()))
 
     def show_preview(self, data):
         if not data:
+            self.current_preview_request = None
             message = tr(self.lang, "preview_unavailable")
             self.preview_label.config(image="", text=message, bg="#202020")
             self.preview_label.image = None
@@ -2096,16 +2216,25 @@ class App:
             self.import_preview_label.image = import_image
 
     def show_source_preview(self, path):
-        data = render_source_image(path)
+        path = Path(path)
+        self.current_preview_request = ("source", path)
+        data = render_source_image(path, self._preview_bounds())
         if data:
             self.show_preview(data)
             return
         if Path(path).suffix.lower() in (".png", ".gif"):
-            self.show_preview_file(path)
+            self.show_preview_file(path, remember=False)
             return
         self.show_preview(None)
 
-    def show_preview_file(self, path):
+    def show_preview_file(self, path, remember=True):
+        path = Path(path)
+        if remember:
+            self.current_preview_request = ("file", path)
+        data = render_source_image(path, self._preview_bounds())
+        if data:
+            self.show_preview(data)
+            return
         try:
             image = PhotoImage(file=str(path))
         except Exception:
@@ -2227,11 +2356,7 @@ class App:
                     except OSError:
                         pass
                 self.queue.put(("log", f"Generating: {image_path}"))
-                source_preview = render_source_image(image_path)
-                if source_preview:
-                    self.queue.put(("preview", source_preview))
-                elif image_path.suffix.lower() in (".png", ".gif"):
-                    self.queue.put(("preview_file", image_path))
+                self.queue.put(("preview_file", image_path))
                 flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
                 cmd = build_generator_command(image_path, setting)
                 self._record_detail(f"GENERATOR COMMAND: {self._format_command(cmd)}")
@@ -2337,7 +2462,7 @@ class App:
                     if preview_files:
                         self.queue.put(("preview_file", preview_files[0]))
                     else:
-                        self.queue.put(("preview", render_geometry_json(output)))
+                        self.queue.put(("preview_json", output))
             self.queue.put(("render_lists", None))
             self.queue.put(("status", tr(self.lang, "done")))
         except Exception as exc:
@@ -2689,6 +2814,8 @@ class App:
                     self.log_line(tr(self.lang, "generation_stopped"))
             elif kind == "preview":
                 self.show_preview(payload)
+            elif kind == "preview_json":
+                self.show_json_preview(payload)
             elif kind == "preview_file":
                 self.show_preview_file(payload)
             elif kind == "render_lists":
