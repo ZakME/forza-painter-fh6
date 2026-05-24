@@ -3,6 +3,7 @@ from pathlib import Path
 
 from app_paths import RESOURCE_ROOT, ROOT
 from geometry_json import drawable_shape_count
+from preprocess.luma import luma_band
 
 
 BUNDLED_SETTINGS_DIR = RESOURCE_ROOT / "config" / "settings"
@@ -22,6 +23,7 @@ SETTING_KEYS = (
     "posterizeLevels",
     "previewEvery",
     "randomSamples",
+    "preprocessMode",
     "saveAt",
     "saveEvery",
     "stopAt",
@@ -128,6 +130,41 @@ def write_user_settings_preset(base_setting, custom_values, output_path, descrip
     return path
 
 
+def _get_preprocess_mode(values):
+    if not values:
+        return None
+    preprocess_mode = str(values.get("preprocessMode", "")).strip().lower()
+    if preprocess_mode == "none" or not preprocess_mode:
+        return None
+    return preprocess_mode
+
+
+def _preprocessed_image_path(image_path, mode):
+    image_path = Path(image_path)
+    return image_path.with_name(f"{image_path.stem}.{mode}{image_path.suffix}")
+
+
+def preprocess_input_image(image_path, setting):
+    image_path = Path(image_path)
+    mode = _get_preprocess_mode(setting.get("values", {}))
+    if mode is None:
+        return image_path
+
+    # Generate output path
+    output_path = _preprocessed_image_path(image_path, mode)
+    try:
+        if output_path.exists() and output_path.stat().st_mtime >= image_path.stat().st_mtime:
+            return output_path
+    except OSError:
+        pass
+    
+    # Generate preprocessed image
+    if mode == "luma_band":
+        return luma_band(image_path)
+    else:
+        raise ValueError(f"unsupported preprocess mode: {mode}")
+
+
 def generated_jsons(image_path):
     image_path = Path(image_path)
     candidates = []
@@ -174,15 +211,18 @@ def best_geometry_jsons(paths):
 def generator_preview_path(image_path):
     PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
     image_path = Path(image_path)
-    return PREVIEW_DIR / f"{image_path.stem}.preview.png"
+    name_without_suffix = _name_without_suffix(image_path)
+    return PREVIEW_DIR / f"{name_without_suffix}.preview.png"
 
 
 def generated_preview_files(image_path):
     image_path = Path(image_path)
     if not PREVIEW_DIR.exists():
         return []
+    # Match previews using full filename
+    name_without_suffix = _name_without_suffix(image_path)
     return sorted(
-        PREVIEW_DIR.glob(f"{image_path.stem}.preview*.png"),
+        PREVIEW_DIR.glob(f"{name_without_suffix}.preview*.png"),
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
@@ -190,8 +230,13 @@ def generated_preview_files(image_path):
 
 def generator_output_base(image_path):
     image_path = Path(image_path)
-    safe_stem = image_path.stem.replace(".", "_")
-    return image_path.with_name(safe_stem)
+    name_without_suffix = _name_without_suffix(image_path)
+    return image_path.with_name(name_without_suffix)
+
+
+def _name_without_suffix(path):
+    path = Path(path)
+    return path.name[:-len(path.suffix)] if path.suffix else path.name
 
 
 def build_generator_command(image_path, setting):

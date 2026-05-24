@@ -24,7 +24,7 @@ import psutil
 from app_paths import ROOT, SOURCE_DIR
 from game_profiles import PROFILES
 from geometry_json import RECTANGLE, ROTATED_ELLIPSE, load_normalized_geometry
-from generator_backend import GENERATOR_EXE, USER_SETTINGS_DIR, best_geometry_jsons, build_generator_command, generated_jsons, generated_preview_files, generator_preview_path, load_settings, write_custom_settings, write_user_settings_preset
+from generator_backend import GENERATOR_EXE, USER_SETTINGS_DIR, best_geometry_jsons, build_generator_command, generated_jsons, generated_preview_files, generator_preview_path, load_settings, preprocess_input_image, write_custom_settings, write_user_settings_preset
 from version import APP_DISPLAY_NAME, __version__, app_title
 
 
@@ -88,6 +88,7 @@ TEXT = {
         "custom_random": "Random samples",
         "custom_mutated": "Mutated samples",
         "custom_save_at": "Save checkpoints",
+        "preprocess_mode": "Preprocess mode",
         "save_custom_preset": "Save as preset",
         "custom_panel_title": "Custom settings",
         "custom_panel_hint": "The selected preset fills these values. Enable custom settings if you want to edit them before generating.",
@@ -220,6 +221,7 @@ Notes
         "custom_random": "随机样本",
         "custom_mutated": "变异样本",
         "custom_save_at": "保存节点",
+        "preprocess_mode": "预处理模式",
         "save_custom_preset": "保存为预设",
         "custom_panel_title": "自定义参数",
         "custom_panel_hint": "上方预设会自动填入这些参数；勾选使用自定义参数后可直接修改。",
@@ -352,6 +354,7 @@ Notes
         "custom_random": "무작위 샘플",
         "custom_mutated": "변형 샘플",
         "custom_save_at": "체크포인트 저장",
+        "preprocess_mode": "전처리 모드",
         "save_custom_preset": "프리셋으로 저장",
         "custom_panel_title": "사용자 설정",
         "custom_panel_hint": "선택한 프리셋 값이 자동으로 채워집니다. 생성 전에 값을 바꾸려면 사용자 설정을 켜세요.",
@@ -881,6 +884,7 @@ class App:
         self.custom_random_samples = StringVar()
         self.custom_mutated_samples = StringVar()
         self.custom_save_at = StringVar()
+        self.custom_preprocess_mode = StringVar(value="none")
         self.translated = []
         self.detailed_log_lock = threading.Lock()
         self.detailed_log_lines = deque()
@@ -1310,6 +1314,8 @@ class App:
             entry.grid(row=row_index, column=1, sticky="ew", pady=1)
             self.custom_fields.append(entry)
         custom_grid.columnconfigure(1, weight=1)
+        preprocess_widget = self._field(custom_grid, "preprocess_mode", self.custom_preprocess_mode, row=len(custom_specs), values=["none", "luma_band"], readonly=True)
+        self.custom_fields.append(preprocess_widget)
         custom_actions = Frame(custom_section)
         custom_actions.pack(fill=X, padx=10, pady=(0, 8))
         self._button(custom_actions, "save_custom_preset", self.save_custom_preset).pack(side=LEFT)
@@ -1476,6 +1482,7 @@ class App:
             self.custom_random_samples.set(values.get("randomSamples", "3000"))
             self.custom_mutated_samples.set(values.get("mutatedSamples", "1000"))
             self.custom_save_at.set(values.get("saveAt", values.get("stopAt", "3000")))
+            self.custom_preprocess_mode.set(values.get("preprocessMode", "none"))
 
     def _sync_custom_state(self):
         state = "normal" if self.use_custom_settings.get() == "1" else "disabled"
@@ -1497,6 +1504,7 @@ class App:
             "randomSamples": self.custom_random_samples.get(),
             "mutatedSamples": self.custom_mutated_samples.get(),
             "saveAt": self.custom_save_at.get(),
+            "preprocessMode": self.custom_preprocess_mode.get(),
         }
         if not custom["saveAt"] and custom["stopAt"]:
             custom["saveAt"] = custom["stopAt"]
@@ -2358,7 +2366,10 @@ class App:
                 self.queue.put(("log", f"Generating: {image_path}"))
                 self.queue.put(("preview_file", image_path))
                 flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-                cmd = build_generator_command(image_path, setting)
+                input_image = preprocess_input_image(image_path, setting)
+                if input_image != image_path:
+                    self.queue.put(("log", f"Preprocessed image: {input_image}"))
+                cmd = build_generator_command(input_image, setting)
                 self._record_detail(f"GENERATOR COMMAND: {self._format_command(cmd)}")
                 self.queue.put(("log", f"Running GPU generator with {setting['path'].name}"))
                 if self.shutdown_event.is_set():
@@ -2421,7 +2432,7 @@ class App:
                             self.queue.put(("status", tr(self.lang, "stopped")))
                             return
                         _drain_generator_output()
-                        preview_files = generated_preview_files(image_path)
+                        preview_files = generated_preview_files(input_image)
                         if preview_files:
                             newest_preview = preview_files[0]
                             preview_mtime = newest_preview.stat().st_mtime
