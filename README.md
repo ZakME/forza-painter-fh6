@@ -148,6 +148,7 @@ Only versioned release entries are kept here. See [CHANGELOG.md](CHANGELOG.md) f
 - Added upstream `errorGridSize` preset support.
 - Integrated the upstream transparent-area overhang prevention algorithm adjustment.
 - Significantly improved generation quality for the large ellipse at the bottom of transparent images.
+- Disabled `luma_band` preprocessing by default in bundled presets.
 
 ### v1.5.4 / 2026-05-23
 
