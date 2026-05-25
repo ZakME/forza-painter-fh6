@@ -14,6 +14,8 @@ webui-data/
 runtime/
 dist/
 build/
+.tools/
+external/
 
 # Large/volatile FH6 diagnostics
 *count-*.json

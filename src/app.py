@@ -25,7 +25,23 @@ import psutil
 from app_paths import ROOT, SOURCE_DIR
 from game_profiles import PROFILES
 from geometry_json import RECTANGLE, ROTATED_ELLIPSE, load_normalized_geometry
-from generator_backend import GENERATOR_EXE, USER_SETTINGS_DIR, best_geometry_jsons, build_generator_command, generated_jsons, generated_preview_files, generator_preview_path, load_settings, preprocess_input_image, write_custom_settings, write_user_settings_preset
+from generator_backend import (
+    GENERATOR_EXE,
+    USER_SETTINGS_DIR,
+    best_geometry_jsons,
+    best_resume_checkpoint,
+    build_generator_command,
+    discover_geometry_jsons,
+    generated_jsons,
+    generated_preview_files,
+    generator_preview_path,
+    load_settings,
+    generator_supports_resume,
+    prepare_generation_setting,
+    preprocess_input_image,
+    write_custom_settings,
+    write_user_settings_preset,
+)
 from version import APP_DISPLAY_NAME, __version__, app_title
 
 
@@ -158,7 +174,8 @@ TEXT = {
         "saved_preset": "Saved preset: {path}",
         "no_image_selected": "No image is selected.",
         "no_json_selected": "No JSON is selected.",
-        "cannot_resume_checkpoint": "Existing checkpoints can be reused/imported, but this GPU generator does not support true resume-from-checkpoint yet.",
+        "resume_generation": "Resuming generation from checkpoint ({layers} layers): {path}",
+        "generator_resume_requires_update": "Checkpoint JSON found, but the bundled GPU generator must be rebuilt before generation can resume. Run scripts/build_generator_with_resume.ps1.",
         "locating": "Finding current FH6 template...",
         "locating_wait": "This can take up to 5 minutes. Keep FH6 in the Vinyl Group Editor, do not switch menus, and wait patiently.",
         "located": "FH6 template located and verified.",
@@ -291,7 +308,8 @@ Notes
         "saved_preset": "已保存预设：{path}",
         "no_image_selected": "没有选中图片。",
         "no_json_selected": "没有选中 JSON。",
-        "cannot_resume_checkpoint": "已有 checkpoint 可以复用/导入，但当前 GPU 生成器还不支持真正从 checkpoint 继续生成。",
+        "resume_generation": "从 checkpoint 继续生成（{layers} 层）：{path}",
+        "generator_resume_requires_update": "已发现 checkpoint JSON，但需要先重新编译内置 GPU 生成器才能从 checkpoint 继续生成。请运行 scripts/build_generator_with_resume.ps1。",
         "locating": "正在查找当前 FH6 模板...",
         "locating_wait": "这一步最长可能需要 5 分钟。请保持 FH6 停留在 Vinyl Group Editor，不要切换菜单，耐心等待。",
         "located": "已安全定位并验证 FH6 模板。",
@@ -424,7 +442,8 @@ Notes
         "saved_preset": "프리셋을 저장했습니다: {path}",
         "no_image_selected": "선택한 이미지가 없습니다.",
         "no_json_selected": "선택한 JSON이 없습니다.",
-        "cannot_resume_checkpoint": "기존 checkpoint는 재사용/가져오기할 수 있지만 현재 GPU 생성기는 진정한 checkpoint 이어하기를 아직 지원하지 않습니다.",
+        "resume_generation": "checkpoint에서 생성 재개 ({layers}개 레이어): {path}",
+        "generator_resume_requires_update": "checkpoint JSON은 있지만 생성 재개를 위해 번들 GPU 생성기를 다시 빌드해야 합니다. scripts/build_generator_with_resume.ps1을 실행하세요.",
         "locating": "현재 FH6 템플릿을 찾는 중...",
         "locating_wait": "최대 5분 정도 걸릴 수 있습니다. FH6를 Vinyl Group Editor에 그대로 두고 메뉴를 전환하지 말고 기다려 주세요.",
         "located": "FH6 템플릿을 찾고 검증했습니다.",
@@ -1600,7 +1619,7 @@ class App:
         return added
 
     def _load_existing_checkpoints_for_image(self, image_path, log_to_queue=False):
-        existing = best_geometry_jsons(generated_jsons(image_path))
+        existing = best_geometry_jsons(discover_geometry_jsons(image_path))
         if not existing:
             return 0
         added = self._add_json_paths(existing[:1])
@@ -1612,8 +1631,8 @@ class App:
                 self.log_line(message)
         return added
 
-    def _queue_generated_outputs(self, image_path, before):
-        after = generated_jsons(image_path)
+    def _queue_generated_outputs(self, image_path, before, input_image=None):
+        after = discover_geometry_jsons(image_path, input_image)
         new_outputs = best_geometry_jsons([path for path in after if path.resolve() not in before])
         if not new_outputs and after:
             new_outputs = best_geometry_jsons(after[:1])
@@ -2056,10 +2075,6 @@ class App:
         self._render_lists()
         if files:
             self.show_source_preview(Path(files[0]))
-        if added_paths:
-            existing_added = sum(1 for path in added_paths if generated_jsons(path))
-            if existing_added:
-                self.log_line(tr(self.lang, "cannot_resume_checkpoint"))
 
     def remove_selected_image(self):
         selection = list(self.image_list.curselection())
@@ -2360,7 +2375,30 @@ class App:
                     self.queue.put(("status", tr(self.lang, "stopped")))
                     return
                 self._reset_generation_eta()
-                before = {path.resolve() for path in generated_jsons(image_path)}
+                input_image = preprocess_input_image(image_path, setting)
+                before = {path.resolve() for path in discover_geometry_jsons(image_path, input_image)}
+                stop_at = self._int_setting(setting, "stopAt")
+                resume_path, resume_layers = best_resume_checkpoint(image_path, input_image, stop_at)
+                if not resume_path and best_geometry_jsons(discover_geometry_jsons(image_path, input_image)):
+                    if not generator_supports_resume():
+                        self.queue.put(("log", tr(self.lang, "generator_resume_requires_update")))
+                generation_setting = setting
+                if self.use_custom_settings.get() == "1":
+                    generation_setting = prepare_generation_setting(
+                        setting,
+                        self._custom_values(),
+                        resume_path=resume_path,
+                    )
+                elif resume_path:
+                    generation_setting = prepare_generation_setting(setting, resume_path=resume_path)
+                if resume_path:
+                    self.queue.put((
+                        "log",
+                        tr(self.lang, "resume_generation").format(
+                            layers=resume_layers,
+                            path=resume_path,
+                        ),
+                    ))
                 preview_path = generator_preview_path(image_path)
                 if preview_path.exists():
                     try:
@@ -2370,12 +2408,11 @@ class App:
                 self.queue.put(("log", f"Generating: {image_path}"))
                 self.queue.put(("preview_file", image_path))
                 flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-                input_image = preprocess_input_image(image_path, setting)
                 if input_image != image_path:
                     self.queue.put(("log", f"Preprocessed image: {input_image}"))
-                cmd = build_generator_command(input_image, setting)
+                cmd = build_generator_command(input_image, generation_setting, resume_path=resume_path)
                 self._record_detail(f"GENERATOR COMMAND: {self._format_command(cmd)}")
-                self.queue.put(("log", f"Running GPU generator with {setting['path'].name}"))
+                self.queue.put(("log", f"Running GPU generator with {generation_setting['path'].name}"))
                 if self.shutdown_event.is_set():
                     self.queue.put(("status", tr(self.lang, "stopped")))
                     return
@@ -2428,7 +2465,7 @@ class App:
                     while proc.poll() is None:
                         if self.shutdown_event.is_set():
                             self._terminate_process(proc)
-                            outputs = self._queue_generated_outputs(image_path, before)
+                            outputs = self._queue_generated_outputs(image_path, before, input_image=input_image)
                             for output in outputs:
                                 self.queue.put(("log", tr(self.lang, "checkpoint_available_after_failure").format(path=output)))
                             if outputs:
@@ -2458,7 +2495,7 @@ class App:
                             self.current_generator_proc = None
                 if proc.returncode != 0:
                     self._record_detail(f"GENERATOR EXIT: {proc.returncode}")
-                    outputs = self._queue_generated_outputs(image_path, before)
+                    outputs = self._queue_generated_outputs(image_path, before, input_image=input_image)
                     for output in outputs:
                         self.queue.put(("log", tr(self.lang, "checkpoint_available_after_failure").format(path=output)))
                     if outputs:
@@ -2467,7 +2504,7 @@ class App:
                     self.queue.put(("status", tr(self.lang, "failed")))
                     return
                 self._record_detail("GENERATOR EXIT: 0")
-                new_outputs = self._queue_generated_outputs(image_path, before)
+                new_outputs = self._queue_generated_outputs(image_path, before, input_image=input_image)
                 if not new_outputs:
                     self.queue.put(("log", "Generator finished but no JSON output was found."))
                     self.queue.put(("status", tr(self.lang, "failed")))

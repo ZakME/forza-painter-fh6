@@ -1,4 +1,6 @@
+import os
 import re
+import subprocess
 from pathlib import Path
 
 from app_paths import RESOURCE_ROOT, ROOT
@@ -32,7 +34,10 @@ SETTING_KEYS = (
     "saveAt",
     "saveEvery",
     "stopAt",
+    "loadGeometry",
 )
+
+_RESUME_SUPPORT = None
 
 
 def setting_description(path):
@@ -171,6 +176,89 @@ def preprocess_input_image(image_path, setting):
         raise ValueError(f"unsupported preprocess mode: {mode}")
 
 
+def generator_supports_resume():
+    global _RESUME_SUPPORT
+    if _RESUME_SUPPORT is not None:
+        return _RESUME_SUPPORT
+    if not GENERATOR_EXE.exists():
+        _RESUME_SUPPORT = False
+        return _RESUME_SUPPORT
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    try:
+        proc = subprocess.run(
+            [str(GENERATOR_EXE), "-help"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=flags,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        _RESUME_SUPPORT = False
+        return _RESUME_SUPPORT
+    output = (proc.stdout or "") + (proc.stderr or "")
+    _RESUME_SUPPORT = "-resume" in output
+    return _RESUME_SUPPORT
+
+
+def discover_geometry_jsons(image_path, input_image=None):
+    image_path = Path(image_path)
+    input_image = Path(input_image) if input_image is not None else image_path
+    paths = []
+    seen = set()
+    for source in (image_path, input_image):
+        for path in generated_jsons(source):
+            key = str(path.resolve()).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            paths.append(path)
+    paths.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return paths
+
+
+def checkpoint_layer_count(path):
+    path = Path(path)
+    match = re.search(r"\.(\d+)$", path.stem)
+    if match:
+        return int(match.group(1))
+    return geometry_shape_count(path)
+
+
+def best_resume_checkpoint(image_path, input_image=None, stop_at=None):
+    if not generator_supports_resume():
+        return None, 0
+    candidates = discover_geometry_jsons(image_path, input_image)
+    if not candidates:
+        return None, 0
+    try:
+        target_layers = int(stop_at) if stop_at is not None else 0
+    except (TypeError, ValueError):
+        target_layers = 0
+    best_path = None
+    best_layers = 0
+    for path in best_geometry_jsons(candidates):
+        layers = checkpoint_layer_count(path)
+        if layers <= 0:
+            continue
+        if target_layers and layers >= target_layers:
+            continue
+        if layers > best_layers:
+            best_layers = layers
+            best_path = path
+    return best_path, best_layers
+
+
+def prepare_generation_setting(base_setting, custom_values=None, resume_path=None):
+    overrides = {key: value for key, value in (custom_values or {}).items() if str(value).strip()}
+    if resume_path:
+        overrides["loadGeometry"] = str(Path(resume_path).resolve())
+    if overrides:
+        return write_custom_settings(base_setting, overrides)
+    return base_setting
+
+
 def generated_jsons(image_path):
     image_path = Path(image_path)
     candidates = []
@@ -245,9 +333,9 @@ def _name_without_suffix(path):
     return path.name[:-len(path.suffix)] if path.suffix else path.name
 
 
-def build_generator_command(image_path, setting):
+def build_generator_command(image_path, setting, resume_path=None):
     image_path = Path(image_path)
-    return [
+    cmd = [
         str(GENERATOR_EXE),
         str(image_path),
         "-settings",
@@ -257,3 +345,6 @@ def build_generator_command(image_path, setting):
         "-preview",
         str(generator_preview_path(image_path)),
     ]
+    if resume_path:
+        cmd.extend(["-resume", str(Path(resume_path).resolve())])
+    return cmd
