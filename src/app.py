@@ -727,30 +727,32 @@ class App:
         self._configure_styles()
         header = Frame(self.root)
         header.pack(fill=X, padx=14, pady=(12, 6))
-        title_box = Frame(header)
-        title_box.pack(side=LEFT, fill=X, expand=True)
-        self._label(title_box, "title", font=("Segoe UI", 18, "bold"), anchor="w").pack(fill=X)
-        self._label(title_box, "subtitle", anchor="w", fg=Theme.MUTED).pack(fill=X)
-        right = Frame(header)
-        right.pack(side=RIGHT)
-        update_row = Frame(right)
-        update_row.pack(anchor="e", fill=X)
+
+        # Title row: title on the left, language selector on the right
+        title_row = Frame(header)
+        title_row.pack(fill=X)
+        self._label(title_row, "title", font=("Segoe UI", 18, "bold")).pack(side=LEFT)
         self.update_indicator = Label(
-            update_row,
+            title_row,
             text="",
             width=2,
-            bg=Theme.PANEL,
+            bg=Theme.BG,
             fg=Theme.WARN,
             font=("Segoe UI", 11, "bold"),
             cursor="hand2",
         )
-        self.update_indicator.pack(side=RIGHT)
+        self.update_indicator.pack(side=RIGHT, padx=(8, 0))
         self.update_indicator.bind("<Button-1>", self.show_update_status)
-        self._label(right, "language").pack(anchor="e")
-        self.lang_combo = ttk.Combobox(right, values=list(LANGUAGES.keys()), state="readonly", width=10)
+        self.lang_combo = ttk.Combobox(title_row, values=list(LANGUAGES.keys()), state="readonly", width=10)
         self.lang_combo.set("English")
-        self.lang_combo.pack(anchor="e")
+        self.lang_combo.pack(side=RIGHT)
         self.lang_combo.bind("<<ComboboxSelected>>", self._on_language)
+        self._label(title_row, "language").pack(side=RIGHT, padx=(0, 6))
+
+        # Subtitle row
+        subtitle_row = Frame(header)
+        subtitle_row.pack(fill=X)
+        self._label(subtitle_row, "subtitle", fg=Theme.MUTED).pack(side=LEFT)
 
         process_bar = Frame(self.root)
         process_bar.pack(fill=X, padx=14, pady=(0, 8))
