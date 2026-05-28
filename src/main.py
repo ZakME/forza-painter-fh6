@@ -225,16 +225,16 @@ def load_geometry(
     loaded = load_cv2()
     if loaded:
         cv2, np = loaded
-        preview = np.zeros((image_h, image_w, 3), np.uint8)
+        preview = np.zeros((int(image_h), int(image_w), 3), np.uint8)
         if bg_a > 0:
-            preview = cv2.rectangle(preview, (0,0), (image_w, image_h), (bg_b, bg_g, bg_r), thickness=-1)
+            preview = cv2.rectangle(preview, (0,0), (int(image_w), int(image_h)), (bg_b, bg_g, bg_r), thickness=-1)
         else:
             preview[:, :] = (38, 38, 38)
         for shape in shapes:
             if shape.color.a <= 0:
                 continue
             if shape.type_id == ROTATED_ELLIPSE:
-                preview = cv2.ellipse(preview, (shape.x, shape.y), (shape.h,shape.w), -90 + shape.rot_deg, 0., 360, (shape.color.b, shape.color.g, shape.color.r), thickness=-1)
+                preview = cv2.ellipse(preview, (shape.x, shape.y), (int(shape.h), int(shape.w)), -90 + shape.rot_deg, 0., 360, (shape.color.b, shape.color.g, shape.color.r), thickness=-1)
             elif shape.type_id == RECTANGLE:
                 x0 = int(round(shape.x - shape.w / 2))
                 y0 = int(round(shape.y - shape.h / 2))
@@ -304,10 +304,10 @@ def load_geometry(
     # with a blank cover, paste blank onto the car, or recover only after the
     # user manually moves the group.
     boundary_masks = [
-        Shape(1, -int(image_w//4), int(image_h//2), int(image_w//2), int(image_h*1.5), 0, Color(0,0,0,255), True),
-        Shape(1, image_w + int(image_w//4), int(image_h//2), int(image_w//2), int(image_h*1.5), 0, Color(0,0,0,255), True),
-        Shape(1, int(image_w//2), -int(image_h//4), image_w + int(image_w), int(image_h//2), 0, Color(0,0,0,255), True),
-        Shape(1, int(image_w//2), image_h + int(image_h//4), image_w + int(image_w), int(image_h//2), 0, Color(0,0,0,255), True),
+        Shape(1, -int(image_w//4), int(image_h//2), float(image_w//2), float(image_h*1.5), 0, Color(0,0,0,255), True),
+        Shape(1, image_w + int(image_w//4), int(image_h//2), float(image_w//2), float(image_h*1.5), 0, Color(0,0,0,255), True),
+        Shape(1, int(image_w//2), -int(image_h//4), float(image_w + image_w), float(image_h//2), 0, Color(0,0,0,255), True),
+        Shape(1, int(image_w//2), image_h + int(image_h//4), float(image_w + image_w), float(image_h//2), 0, Color(0,0,0,255), True),
     ]
     reserved_mask_layers = len(boundary_masks)
     drawable_capacity = max(0, min(int(current_livery_count), 3000) - reserved_mask_layers)

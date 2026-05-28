@@ -159,8 +159,8 @@ def _normalize_data(shape, type_id):
         return None
 
     if type_id == ShapeType.RECTANGLE:
-        return [round(x), round(y), max(0, round(w)), max(0, round(h))]
-    return [round(x), round(y), max(1, round(w)), max(1, round(h)), round(rot) % 360]
+        return [round(x), round(y), max(0.0, w), max(0.0, h)]
+    return [round(x), round(y), max(1.0, w), max(1.0, h), round(rot) % 360]
 
 
 def _normalize_color(value):

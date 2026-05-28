@@ -36,8 +36,8 @@ class Shape:
     type_id: int
     x: int
     y: int
-    w: int
-    h: int
+    w: float
+    h: float
     rot_deg: int
     color: Color
     is_mask: bool
