@@ -1,3 +1,9 @@
+"""Script to rewrite workflow.py with setup-only functions."""
+import sys
+sys.path.insert(0, "src")
+
+# New workflow.py content - setup-only, no subprocess
+content = '''\
 """Core orchestration for region-focused iterative painting.
 
 Setup-only functions that prepare files and return commands.
@@ -62,7 +68,7 @@ def prepare_first_pass(
     state.preview_path = str(preview_png)
     cmd = [str(exe), str(target_png), "-settings", str(temp_ini),
            "-output", str(base_json.with_suffix("")),
-           "-preview", str(output_dir / "_exe_preview")]
+           "-preview", str(preview_png.with_suffix(""))]
     _p(on_progress, f"Command: {cmd[0]} ...")
     return {"cmd": cmd, "output_dir": str(output_dir), "target_png": str(target_png),
             "preview_png": str(preview_png), "base_json": str(base_json),
@@ -127,111 +133,32 @@ def prepare_region_pass(
         return {"error": f"Original settings INI not found: {settings_path}"}
     modify_ini(settings_path, temp_ini, stop_at=new_stop_at)
     base_json = Path(state.base_json)
-    # Back up the accumulated shapes before the exe runs (exe may overwrite base_json).
-    backup_json = output_dir / "_base_backup.json"
-    if base_json.exists():
-        import shutil
-        shutil.copy2(base_json, backup_json)
-    else:
-        backup_json.write_text('{"shapes":[]}', encoding="utf-8")
-
-    cmd = [str(exe), str(region_target), "-resume", str(base_json),
-           "-settings", str(temp_ini),
-           "-preview", str(output_dir / "_exe_preview")]
-    _p(on_progress, f"Region pass: {region_layers} layers (stopAt={new_stop_at}, remaining={state.remaining_budget})")
+    cmd = [str(exe), str(region_target), "-resume", str(base_json), "-settings", str(temp_ini)]
+    _p(on_progress, f"Command: {cmd[0]} ...")
     return {"cmd": cmd, "output_dir": str(output_dir), "target_png": str(target_png),
             "preview_png": state.preview_path, "base_json": str(base_json),
-            "backup_json": str(backup_json),
             "mask_png": str(mask_png), "new_stop_at": new_stop_at,
             "region_layers": region_layers, "state": state,
-            "region_target_stem": region_target.stem,
             "max_preview_size": state.max_preview_size}
 
 
 def finalize_region_pass(prep):
-    """Post-process after region-pass exe finishes.
-
-    The exe with ``-resume`` may only output *new* shapes (not accumulated).
-    We load the old shapes from the backup made before the exe ran,
-    find the exe's new output, merge them, and write to base_json.
-    """
-    import json
-    import shutil
-
+    """Post-process after region-pass exe finishes."""
     state = prep["state"]
-    output_dir = Path(prep["output_dir"])
     base_json = Path(prep["base_json"])
-    backup_json = Path(prep["backup_json"])
     target_png = Path(prep["target_png"])
     preview_png = Path(prep["preview_png"])
     mask_png = prep.get("mask_png", "")
     max_preview_size = prep.get("max_preview_size", 500)
-    region_target_stem = prep.get("region_target_stem", "")
-
-    # Load OLD accumulated shapes from the backup (before exe ran).
-    old_shapes: list[dict] = []
-    if backup_json.exists():
-        try:
-            old_shapes = load_shapes_from_json(backup_json)
-        except Exception:
-            pass
-
-    # Find the exe's NEW output (named after the region target).
-    new_shapes: list[dict] = []
-    if region_target_stem:
-        candidates = sorted(
-            output_dir.glob(f"{region_target_stem}*.json"),
-            key=lambda p: p.stat().st_mtime, reverse=True,
-        )
-        # Also check if base_json was updated (exe might write back to it).
-        if base_json.exists() and base_json.stat().st_mtime > backup_json.stat().st_mtime:
-            candidates.insert(0, base_json)
-        # Deduplicate and pick the first valid one.
-        seen = set()
-        for c in candidates:
-            if c.resolve() not in seen and c.exists() and c != backup_json:
-                seen.add(c.resolve())
-                try:
-                    new_shapes = load_shapes_from_json(c)
-                    break
-                except Exception:
-                    pass
-
-    # Merge: old accumulated shapes + new shapes.
-    old_ellipse_count = sum(1 for s in old_shapes if s.get("type") == 16)
-
-    if new_shapes:
-        # Skip background shape in new shapes if present.
-        start = 1 if (new_shapes and new_shapes[0].get("type") == 1) else 0
-        merged = old_shapes + new_shapes[start:]
-    else:
-        # Exe didn't produce new output — keep old shapes.
-        merged = old_shapes
-
-    merged_ellipse_count = sum(1 for s in merged if s.get("type") == 16)
-    new_layers = max(0, merged_ellipse_count - state.used_layers)
-
-    # Save merged result to base_json.
-    base_json.write_text(
-        json.dumps({"shapes": merged}, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
-    # Render preview from merged shapes.
+    shapes = load_shapes_from_json(base_json)
+    total_layers = max(0, len(shapes) - 1)
+    new_layers = total_layers - state.used_layers
     try:
-        render_preview(target_png, merged, preview_png, max_preview_size)
+        render_preview(target_png, shapes, preview_png, max_preview_size)
     except Exception:
         pass
-
     state.add_pass(mask_path=str(mask_png), layers=new_layers, json_path=str(base_json))
-
-    # Clean up backup.
-    try:
-        backup_json.unlink()
-    except OSError:
-        pass
-
-    return {"ok": True, "new_total": merged_ellipse_count, "preview_png": str(preview_png)}
+    return {"ok": True, "new_total": total_layers, "preview_png": str(preview_png)}
 
 
 def get_status(output_dir):
@@ -263,3 +190,9 @@ def finalize(output_dir, dest_path):
 def _p(callback, msg):
     if callback:
         callback(msg)
+'''
+
+target = "src/region_painter/workflow.py"
+with open(target, "w", encoding="utf-8") as f:
+    f.write(content)
+print(f"Written {target} ({len(content)} bytes)")

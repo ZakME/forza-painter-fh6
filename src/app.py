@@ -29,7 +29,13 @@ from fh6_vinyl_resources import load_vinyl_polygons
 from game_profiles import PROFILES
 from geometry_json import RECTANGLE, ROTATED_ELLIPSE, load_normalized_geometry
 from generator_backend import GENERATOR_EXE, GENERATOR_JSON_SCAN_SECONDS, GENERATOR_POLL_SLEEP_SECONDS, GENERATOR_PREVIEW_SCAN_SECONDS, USER_SETTINGS_DIR, best_geometry_jsons, build_generator_command, build_generator_env, generated_jsons, generated_preview_files, generator_preview_path, load_settings, preprocess_input_image, write_custom_settings, write_user_settings_preset
-from region_painter.workflow import get_status as region_get_status, run_first_pass, run_region_pass
+from region_painter.workflow import (
+    finalize_first_pass,
+    finalize_region_pass,
+    get_status as region_get_status,
+    prepare_first_pass,
+    prepare_region_pass,
+)
 from version import APP_DISPLAY_NAME, __version__, app_title
 
 
@@ -864,6 +870,7 @@ class App:
         self.advanced_visible = False
         # Region Paint state
         self.region_images: list[Path] = []
+        self._region_preview_showing: str = ""
         self.region_selected_profile = StringVar()
         self.region_total_var = StringVar(value="2000")
         self.region_first_var = StringVar(value="1000")
@@ -1443,7 +1450,7 @@ class App:
         self._label(row, "images").pack(side=LEFT)
         self._button(row, "add_images", self.region_add_image).pack(side=RIGHT)
         self._button(row, "remove_image", self.region_remove_image).pack(side=RIGHT, padx=8)
-        self.region_image_list = Listbox(step1, height=2)
+        self.region_image_list = Listbox(step1, height=2, exportselection=False)
         self.region_image_list.pack(fill=X, padx=10, pady=(2, 4))
         self.region_image_list.bind("<<ListboxSelect>>", self._region_on_image_select)
         profile_row = Frame(step1)
@@ -1457,8 +1464,11 @@ class App:
             width=26,
         )
         self.region_profile_combo.pack(side=LEFT, fill=X, expand=True, padx=(8, 0))
+        self.region_profile_combo.bind("<<ComboboxSelected>>", self._region_update_profile_description)
         if self.settings:
             self.region_selected_profile.set(self.settings[min(2, len(self.settings) - 1)]["label"])
+        self.region_profile_description = Label(step1, text="", anchor="w", justify=LEFT, wraplength=350, bg=self._parent_bg(step1), fg=Theme.MUTED)
+        self.region_profile_description.pack(fill=X, padx=10, pady=(0, 8))
 
         # Step 2 — Budget
         step2 = ttk.LabelFrame(left, text=tr(self.lang, "region_step_budget"))
@@ -1549,8 +1559,34 @@ class App:
         self.region_canvas.bind("<ButtonRelease-1>", self._region_canvas_release)
         self.region_canvas.bind("<Double-Button-1>", self._region_canvas_double_click)
         self.region_canvas.bind("<Motion>", self._region_canvas_motion)
+        self.region_canvas.bind("<Configure>", self._region_canvas_configure)
 
         self._region_update_button_states()
+
+    # ==================================================================
+    # Region Paint — Canvas configure (persist preview on resize)
+    # ==================================================================
+
+    def _region_canvas_configure(self, _event=None):
+        """Redraw the image when the canvas resizes."""
+        if self.region_workflow_running:
+            return
+        # If a preview is currently showing, redisplay that instead
+        preview = getattr(self, "_region_preview_showing", None)
+        if preview and Path(preview).exists():
+            if getattr(self, "_region_configure_job", None):
+                self.region_canvas.after_cancel(self._region_configure_job)
+            self._region_configure_job = self.region_canvas.after(
+                200, lambda: self._region_display_preview(Path(preview))
+            )
+            return
+        sel = self.region_image_list.curselection()
+        if sel and sel[0] < len(self.region_images):
+            if getattr(self, "_region_configure_job", None):
+                self.region_canvas.after_cancel(self._region_configure_job)
+            self._region_configure_job = self.region_canvas.after(
+                200, lambda: self._region_display_image(self.region_images[sel[0]])
+            )
 
     # ==================================================================
     # Region Paint — Image management
@@ -1566,6 +1602,13 @@ class App:
             if pp.exists() and pp not in self.region_images:
                 self.region_images.append(pp)
         self._region_refresh_image_list()
+        # Auto-select the last added image
+        if self.region_images:
+            last_idx = len(self.region_images) - 1
+            self.region_image_list.selection_clear(0, END)
+            self.region_image_list.selection_set(last_idx)
+            self.region_image_list.see(last_idx)
+            self._region_display_image(self.region_images[last_idx])
 
     def region_remove_image(self):
         sel = self.region_image_list.curselection()
@@ -1579,11 +1622,12 @@ class App:
     def _region_refresh_image_list(self):
         self.region_image_list.delete(0, END)
         for p in self.region_images:
-            self.region_image_list.insert(END, p.name)
+            self.region_image_list.insert(END, str(p))
         self._region_update_button_states()
 
     def _region_on_image_select(self, _event=None):
         """Display the selected image on the canvas."""
+        self._region_preview_showing = ""  # Clear preview state when manually selecting
         sel = self.region_image_list.curselection()
         if not sel:
             return
@@ -1811,13 +1855,32 @@ class App:
         self.region_first_pass_btn.config(state="normal" if has_image and not running else "disabled")
         self.region_paint_btn.config(state="normal" if has_image and has_shapes and not running else "disabled")
         self.region_stop_btn.config(state="normal" if running else "disabled")
-        # Update remaining
+        # Update remaining from saved state if available, else from entries
+        if self.region_current_output_dir:
+            try:
+                status = region_get_status(self.region_current_output_dir)
+                self.region_remaining_var.set(str(status.get("remaining", 0)))
+                return
+            except Exception:
+                pass
         try:
             total = int(self.region_total_var.get() or 0)
-            first = int(self.region_first_var.get() or 0)
             self.region_remaining_var.set(str(total))
         except ValueError:
             self.region_remaining_var.set("0")
+
+    def _region_update_profile_description(self, _event=None):
+        """Show the selected profile's description and sync total budget."""
+        label = self.region_selected_profile.get()
+        item = next((s for s in self.settings if s["label"] == label), None)
+        desc = item["description"] if item else ""
+        self.region_profile_description.config(text=desc)
+        # Sync total budget from profile's stopAt
+        if item:
+            stop_at = item.get("values", {}).get("stopAt", "")
+            if stop_at:
+                self.region_total_var.set(stop_at)
+                self._region_update_button_states()
 
     # ==================================================================
     # Region Paint — Worker threads
@@ -1845,7 +1908,7 @@ class App:
         except ValueError:
             self.log_line("Invalid budget values.")
             return
-        output_dir = ROOT / "runtime" / "region-painter" / image_path.stem
+        output_dir = ROOT / "runtime" / "region-painter" / f"{image_path.stem}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         self.region_current_output_dir = str(output_dir)
         self.region_workflow_running = True
         self._region_update_button_states()
@@ -1858,17 +1921,87 @@ class App:
         ).start()
 
     def _region_first_pass_worker(self, image_path: Path, setting, first_layers: int, output_dir: Path):
+        """Worker thread: prepare, run exe (streaming), finalize."""
         def on_progress(msg):
             self.queue.put(("region_log", msg))
             self.queue.put(("region_progress", msg))
         try:
-            result = run_first_pass(
+            prep = prepare_first_pass(
                 image_path=str(image_path),
                 settings_path=str(setting["path"]),
                 first_layers=first_layers,
                 output_dir=str(output_dir),
                 on_progress=on_progress,
             )
+            if "error" in prep:
+                self.queue.put(("region_done", {"ok": False, "error": prep["error"]}))
+                return
+
+            # --- Run exe with streaming (same pattern as _generate_worker) ---
+            flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            proc = self._popen_registered(
+                prep["cmd"],
+                cwd=str(output_dir),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                bufsize=1,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=flags,
+                env=build_generator_env(),
+            )
+            if proc is None:
+                self.queue.put(("region_done", {"ok": False, "error": "Shutdown"}))
+                return
+            with self.generation_lock:
+                self.current_generator_proc = proc
+
+            output_queue = queue.Queue()
+
+            def _reader():
+                try:
+                    for raw_line in proc.stdout:
+                        output_queue.put(raw_line)
+                finally:
+                    output_queue.put(None)
+
+            reader = threading.Thread(target=_reader, daemon=True)
+            reader.start()
+
+            try:
+                while proc.poll() is None:
+                    if self.shutdown_event.is_set():
+                        self._terminate_process(proc)
+                        self.queue.put(("region_done", {"ok": False, "error": "Stopped"}))
+                        return
+                    while True:
+                        try:
+                            raw = output_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        if raw is None:
+                            continue
+                        stripped = raw.strip()
+                        if stripped:
+                            friendly = self.friendly_generator_line(stripped)
+                            if friendly:
+                                self.queue.put(("region_log", friendly))
+                    time.sleep(GENERATOR_POLL_SLEEP_SECONDS)
+                reader.join(timeout=1)
+            finally:
+                self._unregister_process(proc)
+                with self.generation_lock:
+                    if self.current_generator_proc is proc:
+                        self.current_generator_proc = None
+
+            if proc.returncode != 0:
+                self.queue.put(("region_log", f"Generator exited with code {proc.returncode}"))
+                self.queue.put(("region_done", {"ok": False, "error": f"Exit code {proc.returncode}"}))
+                return
+
+            result = finalize_first_pass(prep)
+            result["preview_path"] = prep.get("preview_png", "")
             self.queue.put(("region_done", result))
         except Exception as e:
             self.queue.put(("region_status", tr(self.lang, "failed")))
@@ -1899,16 +2032,86 @@ class App:
         ).start()
 
     def _region_pass_worker(self, output_dir: Path, region_layers: int, mask):
+        """Worker thread: prepare, run exe (streaming), finalize."""
         def on_progress(msg):
             self.queue.put(("region_log", msg))
             self.queue.put(("region_progress", msg))
         try:
-            result = run_region_pass(
+            prep = prepare_region_pass(
                 output_dir=str(output_dir),
                 region_layers=region_layers,
                 selection_mask=mask,
                 on_progress=on_progress,
             )
+            if "error" in prep:
+                self.queue.put(("region_done", {"ok": False, "error": prep["error"]}))
+                return
+
+            # --- Run exe with streaming (same pattern as _generate_worker) ---
+            flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            proc = self._popen_registered(
+                prep["cmd"],
+                cwd=str(output_dir),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                bufsize=1,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=flags,
+                env=build_generator_env(),
+            )
+            if proc is None:
+                self.queue.put(("region_done", {"ok": False, "error": "Shutdown"}))
+                return
+            with self.generation_lock:
+                self.current_generator_proc = proc
+
+            output_queue = queue.Queue()
+
+            def _reader():
+                try:
+                    for raw_line in proc.stdout:
+                        output_queue.put(raw_line)
+                finally:
+                    output_queue.put(None)
+
+            reader = threading.Thread(target=_reader, daemon=True)
+            reader.start()
+
+            try:
+                while proc.poll() is None:
+                    if self.shutdown_event.is_set():
+                        self._terminate_process(proc)
+                        self.queue.put(("region_done", {"ok": False, "error": "Stopped"}))
+                        return
+                    while True:
+                        try:
+                            raw = output_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        if raw is None:
+                            continue
+                        stripped = raw.strip()
+                        if stripped:
+                            friendly = self.friendly_generator_line(stripped)
+                            if friendly:
+                                self.queue.put(("region_log", friendly))
+                    time.sleep(GENERATOR_POLL_SLEEP_SECONDS)
+                reader.join(timeout=1)
+            finally:
+                self._unregister_process(proc)
+                with self.generation_lock:
+                    if self.current_generator_proc is proc:
+                        self.current_generator_proc = None
+
+            if proc.returncode != 0:
+                self.queue.put(("region_log", f"Generator exited with code {proc.returncode}"))
+                self.queue.put(("region_done", {"ok": False, "error": f"Exit code {proc.returncode}"}))
+                return
+
+            result = finalize_region_pass(prep)
+            result["preview_path"] = prep.get("preview_png", "")
             self.queue.put(("region_done", result))
         except Exception as e:
             self.queue.put(("region_status", tr(self.lang, "failed")))
@@ -1936,6 +2139,8 @@ class App:
             self.region_canvas_image_ref = ImageTk.PhotoImage(img)
             self.region_canvas.delete("all")
             self.region_canvas.create_image(2, 2, anchor="nw", image=self.region_canvas_image_ref)
+            # Remember that a preview is showing (for Configure redraw)
+            self._region_preview_showing = str(preview_path)
         except Exception:
             pass
 
@@ -4029,7 +4234,11 @@ class App:
                         except Exception:
                             pass
                     # Show preview if available
-                    preview_path = Path(self.region_current_output_dir) / "preview.png"
+                    preview_path = result.get("preview_path")
+                    if not preview_path:
+                        preview_path = Path(self.region_current_output_dir) / "preview.png"
+                    else:
+                        preview_path = Path(preview_path)
                     if preview_path.exists():
                         self._region_display_preview(preview_path)
                 else:
