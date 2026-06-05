@@ -20,7 +20,7 @@ import zipfile
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from tkinter import BOTH, END, LEFT, RIGHT, X, Button, Canvas, Checkbutton, Entry, Frame, Label, Listbox, PhotoImage, StringVar, Text, Tk, Toplevel, filedialog, messagebox, ttk
+from tkinter import BOTH, BOTTOM, END, LEFT, RIGHT, X, Button, Canvas, Checkbutton, Entry, Frame, IntVar, Label, Listbox, PhotoImage, Spinbox, StringVar, Text, Tk, Toplevel, filedialog, messagebox, ttk
 
 import psutil
 
@@ -29,6 +29,13 @@ from fh6_vinyl_resources import load_vinyl_polygons
 from game_profiles import PROFILES
 from geometry_json import RECTANGLE, ROTATED_ELLIPSE, load_normalized_geometry
 from generator_backend import GENERATOR_EXE, GENERATOR_JSON_SCAN_SECONDS, GENERATOR_POLL_SLEEP_SECONDS, GENERATOR_PREVIEW_SCAN_SECONDS, USER_SETTINGS_DIR, best_geometry_jsons, build_generator_command, build_generator_env, generated_jsons, generated_preview_files, generator_preview_path, load_settings, preprocess_input_image, write_custom_settings, write_user_settings_preset
+from region_painter.workflow import (
+    finalize_first_pass,
+    finalize_region_pass,
+    get_status as region_get_status,
+    prepare_first_pass,
+    prepare_region_pass,
+)
 from version import APP_DISPLAY_NAME, __version__, app_title
 
 
@@ -861,6 +868,31 @@ class App:
         self.full_shape_last_report_dir = StringVar()
         self.full_shape_clear_unused = StringVar(value="1")
         self.advanced_visible = False
+        # Region Paint state
+        self.region_images: list[Path] = []
+        self.region_image_label_var = StringVar(value="")
+        self._region_preview_showing: str = ""
+        self.region_selected_profile = StringVar()
+        self.region_total_var = StringVar(value="2000")
+        self.region_first_var = StringVar(value="1000")
+        self.region_layers_var = StringVar(value="300")
+        self.region_remaining_var = StringVar(value="2000")
+        self.region_tool = StringVar(value="rect")
+        self.region_shapes: list[dict] = []
+        self.region_brush_size = IntVar(value=15)
+        self.region_feather = IntVar(value=0)
+        self.region_mask: "Image.Image | None" = None
+        self.region_canvas_image_ref = None
+        self.region_canvas_overlay_ref = None
+        self._region_cached_pil = None       # cached full-res PIL image
+        self._region_cached_pil_path = None  # path the cached image is for
+        self.region_drag_start = None
+        self.region_rubber_id = None
+        self.region_poly_points: list[float] = []
+        self.region_current_output_dir: str = ""
+        self.region_workflow_running = False
+        self.region_status = StringVar(value="Ready")
+        self.region_progress = StringVar(value="")
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.refresh_processes()
@@ -1190,21 +1222,26 @@ class App:
         Label(process_bar, textvariable=self.status, anchor="e", bg=Theme.BG, fg=Theme.MUTED).pack(side=RIGHT)
 
         self.tabs = ttk.Notebook(self.root, style="Primary.TNotebook")
-        self.tabs.pack(fill=BOTH, expand=True, padx=14, pady=(0, 8))
         self.generate_tab = Frame(self.tabs)
         self.import_tab = Frame(self.tabs)
         self.export_tab = Frame(self.tabs)
+        self.region_paint_tab = Frame(self.tabs)
         self.tutorial_tab = Frame(self.tabs)
         self.tabs.add(self.generate_tab, text=tr(self.lang, "generate_tab"))
         self.tabs.add(self.import_tab, text=tr(self.lang, "import_tab"))
         self.tabs.add(self.export_tab, text=tr(self.lang, "export_tab"))
+        self.tabs.add(self.region_paint_tab, text=tr(self.lang, "region_paint_tab"))
         self.tabs.add(self.tutorial_tab, text=tr(self.lang, "tutorial_tab"))
 
         self._build_generate_tab()
         self._build_import_tab()
         self._build_export_tab()
+        self._build_region_paint_tab()
         self._build_tutorial_tab()
+        # Pack log area BEFORE Notebook so side=BOTTOM widgets claim space first
         self._build_log()
+        # Notebook fills remaining space between header/process-bar and log area
+        self.tabs.pack(fill=BOTH, expand=True, padx=14, pady=(0, 8))
         self._apply_dark_theme_recursive(self.root)
         self.tabs.bind("<<NotebookTabChanged>>", self._schedule_preview_refresh)
 
@@ -1367,6 +1404,781 @@ class App:
         self.preview_label.pack(fill=BOTH, expand=True, pady=6)
         self.preview_label.bind("<Configure>", self._schedule_preview_refresh)
 
+    def _build_region_paint_tab(self):
+        """Build the Region Paint tab with image selection, budget, tools, and preview canvas."""
+        # --- Left panel (scrollable controls) ---
+        left_outer = Frame(self.region_paint_tab)
+        left_outer.pack(side=LEFT, fill=BOTH, expand=False, padx=(0, 10), pady=10)
+
+        scroll_area = Frame(left_outer)
+        scroll_area.pack(fill=BOTH, expand=True, pady=(0, 8))
+        left_canvas = Canvas(scroll_area, highlightthickness=0, width=380)
+        left_scroll = ttk.Scrollbar(scroll_area, orient="vertical", command=left_canvas.yview)
+        left_canvas.configure(yscrollcommand=left_scroll.set)
+        left_canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        left_scroll.pack(side=RIGHT, fill="y")
+        left = Frame(left_canvas)
+        left_window = left_canvas.create_window((0, 0), window=left, anchor="nw")
+
+        def _apply_region_scroll_region():
+            left_canvas.configure(scrollregion=left_canvas.bbox("all"))
+
+        def _update_region_scroll_region(_event=None):
+            left_canvas.after(LAYOUT_RESIZE_DEBOUNCE_MS, _apply_region_scroll_region)
+
+        def _match_region_canvas_width(event):
+            width = max(1, int(event.width))
+            bucket = max(1, LAYOUT_SIZE_BUCKET)
+            width = max(1, int(round(width / bucket) * bucket))
+            left_canvas.itemconfigure(left_window, width=width)
+
+        def _region_mousewheel(event):
+            left_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def _bind_region_mousewheel(_event=None):
+            left_canvas.bind_all("<MouseWheel>", _region_mousewheel)
+
+        def _unbind_region_mousewheel(_event=None):
+            left_canvas.unbind_all("<MouseWheel>")
+
+        left.bind("<Configure>", _update_region_scroll_region)
+        left_canvas.bind("<Configure>", _match_region_canvas_width)
+        scroll_area.bind("<Enter>", _bind_region_mousewheel)
+        scroll_area.bind("<Leave>", _unbind_region_mousewheel)
+
+        # Step 1 — Image & Profile
+        step1 = ttk.LabelFrame(left, text=tr(self.lang, "region_step_image"))
+        self.translated.append((step1, "region_step_image", "text"))
+        step1.pack(fill=X, pady=(0, 6))
+        row = Frame(step1)
+        row.pack(fill=X, padx=10, pady=(6, 2))
+        self._label(row, "images").pack(side=LEFT)
+        self._button(row, "add_images", self.region_add_image).pack(side=RIGHT)
+        Label(step1, textvariable=self.region_image_label_var, anchor="w", bg=self._parent_bg(step1), fg=Theme.MUTED, wraplength=350).pack(fill=X, padx=10, pady=(2, 4))
+        profile_row = Frame(step1)
+        profile_row.pack(fill=X, padx=10, pady=(0, 8))
+        self._label(profile_row, "quality").pack(side=LEFT)
+        self.region_profile_combo = ttk.Combobox(
+            profile_row,
+            values=[item["label"] for item in self.settings],
+            textvariable=self.region_selected_profile,
+            state="readonly",
+            width=26,
+        )
+        self.region_profile_combo.pack(side=LEFT, fill=X, expand=True, padx=(8, 0))
+        self.region_profile_combo.bind("<<ComboboxSelected>>", self._region_update_profile_description)
+        if self.settings:
+            self.region_selected_profile.set(self.settings[min(2, len(self.settings) - 1)]["label"])
+        self.region_profile_description = Label(step1, text="", anchor="w", justify=LEFT, wraplength=350, bg=self._parent_bg(step1), fg=Theme.MUTED)
+        self.region_profile_description.pack(fill=X, padx=10, pady=(0, 8))
+
+        # Step 2 — Budget
+        step2 = ttk.LabelFrame(left, text=tr(self.lang, "region_step_budget"))
+        self.translated.append((step2, "region_step_budget", "text"))
+        step2.pack(fill=X, pady=(0, 6))
+        budget_grid = Frame(step2)
+        budget_grid.pack(fill=X, padx=10, pady=(8, 8))
+        for ri, (key, var) in enumerate([
+            ("region_total_layers", self.region_total_var),
+            ("region_first_pass_layers", self.region_first_var),
+            ("region_region_layers", self.region_layers_var),
+        ]):
+            self._label(budget_grid, key, anchor="w").grid(row=ri, column=0, sticky="w", pady=1, padx=(0, 8))
+            Entry(budget_grid, textvariable=var, width=10).grid(row=ri, column=1, sticky="ew", pady=1)
+        rem_row = Frame(step2)
+        rem_row.pack(fill=X, padx=10, pady=(0, 8))
+        self._label(rem_row, "region_remaining").pack(side=LEFT)
+        Label(rem_row, textvariable=self.region_remaining_var, fg=Theme.ACCENT, bg=self._parent_bg(rem_row)).pack(side=LEFT, padx=6)
+
+        # Step 3 — Selection Tools
+        step3 = ttk.LabelFrame(left, text=tr(self.lang, "region_step_selection"))
+        self.translated.append((step3, "region_step_selection", "text"))
+        step3.pack(fill=X, pady=(0, 6))
+        tool_row = Frame(step3)
+        tool_row.pack(fill=X, padx=10, pady=(8, 4))
+        tools = [
+            ("region_tool_rect", "rect"),
+            ("region_tool_ellipse", "ellipse"),
+        ]
+        for key, value in tools:
+            btn = Button(
+                tool_row,
+                text=tr(self.lang, key),
+                command=lambda v=value: self._region_set_tool(v),
+                relief="flat", bd=1, padx=6, pady=2,
+                font=("Segoe UI", 9),
+            )
+            btn.pack(side=LEFT, padx=2)
+            self.translated.append((btn, key, "text"))
+        self._button(tool_row, "region_tool_clear", self._region_clear_mask).pack(side=LEFT, padx=(8, 2))
+        # Feather
+        feather_row = Frame(step3)
+        feather_row.pack(fill=X, padx=10, pady=(0, 8))
+        self._label(feather_row, "region_feather").pack(side=LEFT)
+        Spinbox(feather_row, from_=0, to=50, increment=1, width=5, textvariable=self.region_feather).pack(side=LEFT, padx=8)
+
+        # Step 4 — Actions
+        step4 = ttk.LabelFrame(left_outer, text=tr(self.lang, "region_step_actions"))
+        self.translated.append((step4, "region_step_actions", "text"))
+        step4.pack(fill=X)
+        actions = Frame(step4)
+        actions.pack(fill=X, padx=10, pady=(8, 4))
+        self.region_first_pass_btn = self._button(actions, "region_start_first_pass", self._region_start_first_pass, font=("Segoe UI", 11, "bold"), height=2)
+        self.region_first_pass_btn.pack(side=LEFT, fill=X, expand=True)
+        self.region_paint_btn = self._button(actions, "region_paint_region", self._region_start_pass, height=2, state="disabled")
+        self.region_paint_btn.pack(side=LEFT, padx=6, fill=X, expand=True)
+        self.region_stop_btn = self._button(actions, "region_stop", self._region_stop, height=2, state="disabled")
+        self.region_stop_btn.pack(side=LEFT, padx=6)
+        status_row = Frame(step4)
+        status_row.pack(fill=X, padx=10, pady=(0, 8))
+        Label(status_row, textvariable=self.region_status, fg=Theme.MUTED, bg=self._parent_bg(status_row), anchor="w", wraplength=180).pack(side=LEFT)
+        Label(status_row, textvariable=self.region_progress, fg=Theme.ACCENT, bg=self._parent_bg(status_row), font=("Segoe UI", 9), anchor="e", wraplength=180).pack(side=RIGHT)
+
+        # Pass History
+        hist = ttk.LabelFrame(left_outer, text=tr(self.lang, "region_pass_history"))
+        self.translated.append((hist, "region_pass_history", "text"))
+        hist.pack(fill=X, pady=(6, 0))
+        self.region_pass_list = Listbox(hist, height=4)
+        self.region_pass_list.pack(fill=X, padx=10, pady=(4, 8))
+
+        # Result actions
+        result_row = Frame(left_outer)
+        result_row.pack(fill=X, pady=(4, 0))
+        self.region_open_folder_btn = self._button(result_row, "region_open_result_folder", self._region_open_result_folder, state="disabled")
+        self.region_open_folder_btn.pack(side=LEFT, fill=X, expand=True)
+        self.region_save_json_btn = self._button(result_row, "region_save_result_json", self._region_save_result_json, state="disabled")
+        self.region_save_json_btn.pack(side=LEFT, padx=6, fill=X, expand=True)
+
+        # --- Right panel (Canvas) ---
+        right = Frame(self.region_paint_tab)
+        right.pack(side=RIGHT, fill=BOTH, expand=True, pady=10)
+        # Labels above canvases
+        canvas_label_row = Frame(right)
+        canvas_label_row.pack(fill=X)
+        self._label(canvas_label_row, "region_original_label", anchor="w").pack(side=LEFT, expand=True, fill=X)
+        self._label(canvas_label_row, "region_preview_label", anchor="w").pack(side=LEFT, expand=True, fill=X)
+        # Canvases side by side
+        canvas_row = Frame(right)
+        canvas_row.pack(fill=BOTH, expand=True, pady=6)
+        self.region_canvas_left = Canvas(canvas_row, bg=Theme.INPUT, highlightthickness=1, highlightbackground=Theme.BORDER, cursor="cross")
+        self.region_canvas_left.pack(side=LEFT, fill=BOTH, expand=True)
+        self.region_canvas_right = Canvas(canvas_row, bg=Theme.INPUT, highlightthickness=1, highlightbackground=Theme.BORDER)
+        self.region_canvas_right.pack(side=LEFT, fill=BOTH, expand=True)
+        # Backwards compatibility alias — selection tools use left canvas
+        self.region_canvas = self.region_canvas_left
+
+        # Canvas bindings for selection tools
+        self.region_canvas.bind("<Button-1>", self._region_canvas_press)
+        self.region_canvas.bind("<B1-Motion>", self._region_canvas_drag)
+        self.region_canvas.bind("<ButtonRelease-1>", self._region_canvas_release)
+        self.region_canvas.bind("<Double-Button-1>", self._region_canvas_double_click)
+        self.region_canvas.bind("<Motion>", self._region_canvas_motion)
+        self.region_canvas.bind("<Configure>", self._region_canvas_configure)
+        self.region_canvas_right.bind("<Configure>", self._region_canvas_configure)
+
+        if self.settings:
+            self._region_update_profile_description()  # sync stopAt → total budget
+        self._region_update_button_states()
+
+    # ==================================================================
+    # Region Paint — Canvas configure (persist preview on resize)
+    # ==================================================================
+
+    def _region_canvas_configure(self, _event=None):
+        """Redraw the image/preview when canvases resize."""
+        if self.region_workflow_running:
+            return
+        # Redraw original image on left canvas if an image is selected
+        if self.region_images:
+            if getattr(self, "_region_configure_image_job", None):
+                self.region_canvas_left.after_cancel(self._region_configure_image_job)
+            self._region_configure_image_job = self.region_canvas_left.after(
+                200, lambda: self._region_display_image(self.region_images[0])
+            )
+        # Redraw preview on right canvas if a preview is showing
+        preview = getattr(self, "_region_preview_showing", None)
+        if preview and Path(preview).exists():
+            if getattr(self, "_region_configure_preview_job", None):
+                self.region_canvas_right.after_cancel(self._region_configure_preview_job)
+            self._region_configure_preview_job = self.region_canvas_right.after(
+                200, lambda: self._region_display_preview(Path(preview))
+            )
+
+    # ==================================================================
+    # Region Paint — Image management
+    # ==================================================================
+
+    def region_add_image(self):
+        paths = filedialog.askopenfilenames(
+            title=tr(self.lang, "add_images"),
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp"), ("All files", "*.*")],
+        )
+        if not paths:
+            return
+        # Only keep the last selected image — replace any existing image.
+        pp = Path(paths[-1])
+        if not pp.exists():
+            return
+        self.region_images.clear()
+        self.region_images.append(pp)
+        self._region_clear_mask()
+        self._region_update_image_label()
+        self._region_display_image(pp)
+
+    def _region_update_image_label(self):
+        """Update the image label to show the current image path."""
+        if self.region_images:
+            self.region_image_label_var.set(str(self.region_images[0]))
+        else:
+            self.region_image_label_var.set("")
+        self._region_update_button_states()
+
+    def _region_display_image(self, image_path: Path):
+        """Load and display an image on the LEFT region canvas."""
+        try:
+            from PIL import Image, ImageTk
+            # Cache the full-res image so redraws avoid disk I/O.
+            if self._region_cached_pil is None or self._region_cached_pil_path != image_path:
+                self._region_cached_pil = Image.open(image_path).convert("RGBA")
+                self._region_cached_pil_path = image_path
+            img = self._region_cached_pil.copy()
+            cw = self.region_canvas_left.winfo_width() or 300
+            ch = self.region_canvas_left.winfo_height() or 500
+            display_size = min(cw - 4, ch - 4, 600)
+            ratio = display_size / max(img.width, img.height)
+            new_w = max(1, int(img.width * ratio))
+            new_h = max(1, int(img.height * ratio))
+            img = img.resize((new_w, new_h), Image.LANCZOS)
+            self.region_canvas_image_ref = ImageTk.PhotoImage(img)
+            self.region_canvas_left.delete("all")
+            self.region_canvas_left.create_image(2, 2, anchor="nw", image=self.region_canvas_image_ref)
+            self._region_redraw_overlay()
+        except Exception as e:
+            self.log_line(f"Region Paint: failed to load image: {e}")
+
+    # ==================================================================
+    # Region Paint — Canvas mouse handlers
+    # ==================================================================
+
+    def _region_set_tool(self, tool: str):
+        self.region_tool.set(tool)
+        self.region_canvas.configure(cursor="cross")
+
+    def _region_get_canvas_scale(self) -> float:
+        """Compute scale factor: canvas-display-pixels / working-pixels."""
+        if not self.region_images:
+            return 1.0
+        try:
+            if self._region_cached_pil is not None:
+                w, h = self._region_cached_pil.size
+            else:
+                from PIL import Image
+                img = Image.open(self.region_images[0])
+                w, h = img.size
+            display_w = max(1, (self.region_canvas.winfo_width() or 600) - 4)
+            display_h = max(1, (self.region_canvas.winfo_height() or 500) - 4)
+            display_size = min(display_w, display_h, 600)
+            ratio = display_size / max(w, h)
+            return ratio  # canvas_pixels / working_pixels
+        except Exception:
+            return 1.0
+
+    def _region_canvas_press(self, event):
+        tool = self.region_tool.get()
+        if tool in ("rect", "ellipse"):
+            self.region_drag_start = (event.x, event.y)
+
+    def _region_canvas_drag(self, event):
+        tool = self.region_tool.get()
+        if tool == "rect":
+            if self.region_drag_start:
+                x1, y1 = self.region_drag_start
+                if self.region_rubber_id:
+                    self.region_canvas.delete(self.region_rubber_id)
+                self.region_rubber_id = self.region_canvas.create_rectangle(x1, y1, event.x, event.y, outline="#ff4444", dash=(4, 2))
+        elif tool == "ellipse":
+            if self.region_drag_start:
+                x1, y1 = self.region_drag_start
+                if self.region_rubber_id:
+                    self.region_canvas.delete(self.region_rubber_id)
+                self.region_rubber_id = self.region_canvas.create_oval(x1, y1, event.x, event.y, outline="#ff4444", dash=(4, 2))
+
+    def _region_canvas_release(self, event):
+        tool = self.region_tool.get()
+        if tool in ("rect", "ellipse") and self.region_drag_start:
+            x1, y1 = self.region_drag_start
+            x2, y2 = event.x, event.y
+            if abs(x2 - x1) > 3 and abs(y2 - y1) > 3:
+                self.region_shapes.append({"tool": tool, "coords": [x1, y1, x2, y2]})
+            if self.region_rubber_id:
+                self.region_canvas.delete(self.region_rubber_id)
+                self.region_rubber_id = None
+            self.region_drag_start = None
+            self._region_redraw_overlay()
+        self._region_update_button_states()
+
+    def _region_canvas_double_click(self, event):
+        pass  # no-op (polygon removed)
+
+    def _region_canvas_motion(self, _event):
+        """Cursor preview (no-op for now, could show crosshair)."""
+        pass
+
+    def _region_redraw_overlay(self):
+        """Redraw the red semi-transparent mask overlay on the canvas."""
+        try:
+            from PIL import Image, ImageDraw, ImageTk
+        except Exception:
+            return
+        if not self.region_images:
+            return
+        image_path = self.region_images[0]
+        # Use cached full-res image to avoid disk I/O.
+        if self._region_cached_pil is None or self._region_cached_pil_path != image_path:
+            self._region_cached_pil = Image.open(image_path).convert("RGBA")
+            self._region_cached_pil_path = image_path
+        img = self._region_cached_pil.copy()
+        cw = self.region_canvas.winfo_width() or 600
+        ch = self.region_canvas.winfo_height() or 500
+        display_size = min(cw - 4, ch - 4, 600)
+        ratio = display_size / max(img.width, img.height)
+        new_w = max(1, int(img.width * ratio))
+        new_h = max(1, int(img.height * ratio))
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+        # Draw red overlay for each shape
+        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        for shape in self.region_shapes:
+            tool = shape.get("tool", "")
+            coords = shape.get("coords", [])
+            if tool in ("rect", "ellipse") and len(coords) >= 4:
+                x1, y1, x2, y2 = [int(c) for c in coords[:4]]
+                x1, x2 = sorted([x1, x2])
+                y1, y2 = sorted([y1, y2])
+                if tool == "rect":
+                    draw.rectangle([x1, y1, x2, y2], fill=(255, 0, 0, 80))
+                else:
+                    draw.ellipse([x1, y1, x2, y2], fill=(255, 0, 0, 80))
+        img = Image.alpha_composite(img, overlay)
+        self.region_canvas_image_ref = ImageTk.PhotoImage(img)
+        self.region_canvas.delete("all")
+        self.region_canvas.create_image(2, 2, anchor="nw", image=self.region_canvas_image_ref)
+
+    def _region_clear_mask(self):
+        self.region_shapes.clear()
+        self.region_poly_points.clear()
+        self.region_drag_start = None
+        if self.region_rubber_id:
+            self.region_canvas.delete(self.region_rubber_id)
+            self.region_rubber_id = None
+        self.region_mask = None
+        if self.region_images:
+            self._region_display_image(self.region_images[0])
+        self._region_update_button_states()
+
+    def _region_generate_mask(self) -> "Image.Image | None":
+        """Convert canvas shapes to a PIL 'L' mask at working resolution."""
+        if not self.region_shapes or not self.region_images:
+            return None
+        try:
+            from PIL import Image
+            img = Image.open(self.region_images[0])
+            w, h = img.size
+            scale = self._region_get_canvas_scale()
+            from region_painter.image_processor import mask_from_canvas_shapes
+            mask = mask_from_canvas_shapes(self.region_shapes, w, h, scale)
+            feather = self.region_feather.get()
+            if feather > 0:
+                from PIL import ImageFilter
+                mask = mask.filter(ImageFilter.GaussianBlur(radius=feather))
+            return mask
+        except Exception as e:
+            self.log_line(f"Region Paint: mask generation failed: {e}")
+            return None
+
+    # ==================================================================
+    # Region Paint — Button state management
+    # ==================================================================
+
+    def _region_update_button_states(self):
+        has_image = bool(self.region_images)
+        has_shapes = bool(self.region_shapes)
+        running = self.region_workflow_running
+        has_output = bool(self.region_current_output_dir)
+        self.region_first_pass_btn.config(state="normal" if has_image and not running else "disabled")
+        self.region_paint_btn.config(state="normal" if has_image and has_shapes and not running else "disabled")
+        self.region_stop_btn.config(state="normal" if running else "disabled")
+        self.region_open_folder_btn.config(state="normal" if has_output and not running else "disabled")
+        self.region_save_json_btn.config(state="normal" if has_output and not running else "disabled")
+        # Update remaining from saved state if available, else from entries
+        if self.region_current_output_dir:
+            try:
+                status = region_get_status(self.region_current_output_dir)
+                self.region_remaining_var.set(str(status.get("remaining", 0)))
+                return
+            except Exception:
+                pass
+        try:
+            total = int(self.region_total_var.get() or 0)
+            self.region_remaining_var.set(str(total))
+        except ValueError:
+            self.region_remaining_var.set("0")
+
+    def _region_update_profile_description(self, _event=None):
+        """Show the selected profile's description and sync total budget."""
+        label = self.region_selected_profile.get()
+        item = next((s for s in self.settings if s["label"] == label), None)
+        desc = item["description"] if item else ""
+        self.region_profile_description.config(text=desc)
+        # Sync total budget from profile's stopAt
+        if item:
+            stop_at = item.get("values", {}).get("stopAt", "")
+            if stop_at:
+                self.region_total_var.set(stop_at)
+                self._region_update_button_states()
+
+    # ==================================================================
+    # Region Paint — Result actions
+    # ==================================================================
+
+    def _region_open_result_folder(self):
+        """Open the current output directory in the file manager."""
+        if not self.region_current_output_dir:
+            return
+        folder = Path(self.region_current_output_dir)
+        if folder.exists():
+            os.startfile(folder)
+            self.log_line(f"Region Paint: opened result folder — {folder}")
+
+    def _region_save_result_json(self):
+        """Save base.json from the current output directory to a user-chosen location."""
+        if not self.region_current_output_dir:
+            return
+        base_json = Path(self.region_current_output_dir) / "base.json"
+        if not base_json.exists():
+            self.log_line("Region Paint: result JSON not found. Run a pass first.")
+            return
+        output = filedialog.asksaveasfilename(
+            title="Save result JSON",
+            initialdir=str(Path(self.region_current_output_dir)),
+            initialfile="base.json",
+            defaultextension=".json",
+            filetypes=[("Geometry JSON", "*.json"), ("All files", "*.*")],
+        )
+        if not output:
+            return
+        try:
+            shutil.copy2(base_json, output)
+            self.log_line(f"Region Paint: result JSON saved — {output}")
+        except OSError as exc:
+            self.log_line(f"Region Paint: failed to save result JSON: {exc}")
+
+    # ==================================================================
+    # Region Paint — Worker threads
+    # ==================================================================
+
+    def _region_start_first_pass(self):
+        if not self.region_images:
+            self.log_line(tr(self.lang, "region_no_image"))
+            return
+        image_path = self.region_images[0]
+        profile_label = self.region_selected_profile.get()
+        setting = next((s for s in self.settings if s["label"] == profile_label), None)
+        if setting is None and self.settings:
+            setting = self.settings[0]
+        if setting is None:
+            self.log_line("No quality profile selected.")
+            return
+        try:
+            total_budget = int(self.region_total_var.get() or 2000)
+            first_layers = int(self.region_first_var.get() or 1000)
+        except ValueError:
+            self.log_line("Invalid budget values.")
+            return
+        output_dir = ROOT / "runtime" / "region-painter" / f"{image_path.stem}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        self.region_current_output_dir = str(output_dir)
+        self.region_workflow_running = True
+        # state.json does not exist yet — show total budget as remaining
+        self.region_remaining_var.set(str(total_budget))
+        self._region_update_button_states()
+        self.region_status.set(tr(self.lang, "running"))
+        self.region_progress.set("Starting first pass...")
+        self.log_line("Region Paint: first pass starting...")
+        threading.Thread(
+            target=self._region_first_pass_worker,
+            args=(image_path, setting, first_layers, output_dir),
+            daemon=True,
+        ).start()
+
+    def _region_first_pass_worker(self, image_path: Path, setting, first_layers: int, output_dir: Path):
+        """Worker thread: prepare, run exe (streaming), finalize."""
+        def on_progress(msg):
+            self.queue.put(("region_log", msg))
+            self.queue.put(("region_progress", msg))
+        try:
+            prep = prepare_first_pass(
+                image_path=str(image_path),
+                settings_path=str(setting["path"]),
+                first_layers=first_layers,
+                output_dir=str(output_dir),
+                on_progress=on_progress,
+            )
+            if "error" in prep:
+                self.queue.put(("region_done", {"ok": False, "error": prep["error"]}))
+                return
+
+            # --- Run exe with streaming (same pattern as _generate_worker) ---
+            flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            proc = self._popen_registered(
+                prep["cmd"],
+                cwd=str(output_dir),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                bufsize=1,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=flags,
+                env=build_generator_env(),
+            )
+            if proc is None:
+                self.queue.put(("region_done", {"ok": False, "error": "Shutdown"}))
+                return
+            with self.generation_lock:
+                self.current_generator_proc = proc
+
+            output_queue = queue.Queue()
+
+            def _reader():
+                try:
+                    for raw_line in proc.stdout:
+                        output_queue.put(raw_line)
+                finally:
+                    output_queue.put(None)
+
+            reader = threading.Thread(target=_reader, daemon=True)
+            reader.start()
+
+            # --- Poll for exe preview files (same pattern as _generate_worker) ---
+            last_preview_mtime = None
+            next_preview_scan = 0.0
+
+            try:
+                while proc.poll() is None:
+                    if self.shutdown_event.is_set():
+                        self._terminate_process(proc)
+                        self.queue.put(("region_done", {"ok": False, "error": "Stopped"}))
+                        return
+                    while True:
+                        try:
+                            raw = output_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        if raw is None:
+                            continue
+                        stripped = raw.strip()
+                        if stripped:
+                            friendly = self.friendly_generator_line(stripped)
+                            if friendly:
+                                self.queue.put(("region_log", friendly))
+                    # --- Preview polling ---
+                    now = time.monotonic()
+                    if now >= next_preview_scan:
+                        next_preview_scan = now + GENERATOR_PREVIEW_SCAN_SECONDS
+                        preview_files = sorted(
+                            output_dir.glob("_exe_preview*.png"),
+                            key=lambda p: p.stat().st_mtime, reverse=True,
+                        )
+                        if preview_files:
+                            newest = preview_files[0]
+                            try:
+                                mtime = newest.stat().st_mtime
+                            except OSError:
+                                mtime = None
+                            if mtime is not None and mtime != last_preview_mtime:
+                                last_preview_mtime = mtime
+                                self.queue.put(("region_preview", str(newest)))
+                    time.sleep(GENERATOR_POLL_SLEEP_SECONDS)
+                reader.join(timeout=1)
+            finally:
+                self._unregister_process(proc)
+                with self.generation_lock:
+                    if self.current_generator_proc is proc:
+                        self.current_generator_proc = None
+
+            if proc.returncode != 0:
+                self.queue.put(("region_log", f"Generator exited with code {proc.returncode}"))
+                self.queue.put(("region_done", {"ok": False, "error": f"Exit code {proc.returncode}"}))
+                return
+
+            result = finalize_first_pass(prep)
+            result["preview_path"] = prep.get("preview_png", "")
+            self.queue.put(("region_done", result))
+        except Exception as e:
+            self.queue.put(("region_status", tr(self.lang, "failed")))
+            self.queue.put(("region_log", f"First pass error: {e}"))
+            self.queue.put(("region_done", {"ok": False, "error": str(e)}))
+
+    def _region_start_pass(self):
+        if self.region_workflow_running:
+            self.log_line("Region Paint: already running, ignoring duplicate request.")
+            return
+        if not self.region_shapes:
+            self.log_line(tr(self.lang, "region_no_mask"))
+            return
+        mask = self._region_generate_mask()
+        if mask is None:
+            self.log_line("Failed to generate selection mask.")
+            return
+        try:
+            region_layers = int(self.region_layers_var.get() or 300)
+        except ValueError:
+            region_layers = 300
+        output_dir = Path(self.region_current_output_dir)
+        self.region_workflow_running = True
+        self._region_update_button_states()
+        self.region_status.set(tr(self.lang, "running"))
+        self.region_progress.set("Starting region pass...")
+        self.log_line("Region Paint: region pass starting...")
+        threading.Thread(
+            target=self._region_pass_worker,
+            args=(output_dir, region_layers, mask),
+            daemon=True,
+        ).start()
+
+    def _region_pass_worker(self, output_dir: Path, region_layers: int, mask):
+        """Worker thread: prepare, run exe (streaming), finalize."""
+        def on_progress(msg):
+            self.queue.put(("region_log", msg))
+            self.queue.put(("region_progress", msg))
+        try:
+            prep = prepare_region_pass(
+                output_dir=str(output_dir),
+                region_layers=region_layers,
+                selection_mask=mask,
+                on_progress=on_progress,
+            )
+            if "error" in prep:
+                self.queue.put(("region_done", {"ok": False, "error": prep["error"]}))
+                return
+
+            # --- Run exe with streaming (same pattern as _generate_worker) ---
+            flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            proc = self._popen_registered(
+                prep["cmd"],
+                cwd=str(output_dir),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                bufsize=1,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=flags,
+                env=build_generator_env(),
+            )
+            if proc is None:
+                self.queue.put(("region_done", {"ok": False, "error": "Shutdown"}))
+                return
+            with self.generation_lock:
+                self.current_generator_proc = proc
+
+            output_queue = queue.Queue()
+
+            def _reader():
+                try:
+                    for raw_line in proc.stdout:
+                        output_queue.put(raw_line)
+                finally:
+                    output_queue.put(None)
+
+            reader = threading.Thread(target=_reader, daemon=True)
+            reader.start()
+
+            # --- Poll for exe preview files ---
+            last_preview_mtime = None
+            next_preview_scan = 0.0
+
+            try:
+                while proc.poll() is None:
+                    if self.shutdown_event.is_set():
+                        self._terminate_process(proc)
+                        self.queue.put(("region_done", {"ok": False, "error": "Stopped"}))
+                        return
+                    while True:
+                        try:
+                            raw = output_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        if raw is None:
+                            continue
+                        stripped = raw.strip()
+                        if stripped:
+                            friendly = self.friendly_generator_line(stripped)
+                            if friendly:
+                                self.queue.put(("region_log", friendly))
+                    # --- Preview polling ---
+                    now = time.monotonic()
+                    if now >= next_preview_scan:
+                        next_preview_scan = now + GENERATOR_PREVIEW_SCAN_SECONDS
+                        preview_files = sorted(
+                            output_dir.glob("_exe_preview*.png"),
+                            key=lambda p: p.stat().st_mtime, reverse=True,
+                        )
+                        if preview_files:
+                            newest = preview_files[0]
+                            try:
+                                mtime = newest.stat().st_mtime
+                            except OSError:
+                                mtime = None
+                            if mtime is not None and mtime != last_preview_mtime:
+                                last_preview_mtime = mtime
+                                self.queue.put(("region_preview", str(newest)))
+                    time.sleep(GENERATOR_POLL_SLEEP_SECONDS)
+                reader.join(timeout=1)
+            finally:
+                self._unregister_process(proc)
+                with self.generation_lock:
+                    if self.current_generator_proc is proc:
+                        self.current_generator_proc = None
+
+            if proc.returncode != 0:
+                self.queue.put(("region_log", f"Generator exited with code {proc.returncode}"))
+                self.queue.put(("region_done", {"ok": False, "error": f"Exit code {proc.returncode}"}))
+                return
+
+            result = finalize_region_pass(prep)
+            result["preview_path"] = prep.get("preview_png", "")
+            self.queue.put(("region_done", result))
+        except Exception as e:
+            self.queue.put(("region_status", tr(self.lang, "failed")))
+            self.queue.put(("region_log", f"Region pass error: {e}"))
+            self.queue.put(("region_done", {"ok": False, "error": str(e)}))
+
+    def _region_stop(self):
+        self.shutdown_event.set()
+        self.region_status.set(tr(self.lang, "stopped"))
+        self.region_workflow_running = False
+        self._region_update_button_states()
+
+    def _region_display_preview(self, preview_path: Path):
+        """Display a rendered preview image on the RIGHT region canvas."""
+        try:
+            from PIL import Image, ImageTk
+            img = Image.open(preview_path).convert("RGBA")
+            cw = self.region_canvas_right.winfo_width() or 300
+            ch = self.region_canvas_right.winfo_height() or 500
+            display_size = min(cw - 4, ch - 4, 600)
+            ratio = display_size / max(img.width, img.height)
+            new_w = max(1, int(img.width * ratio))
+            new_h = max(1, int(img.height * ratio))
+            img = img.resize((new_w, new_h), Image.LANCZOS)
+            self.region_preview_ref = ImageTk.PhotoImage(img)
+            self.region_canvas_right.delete("all")
+            self.region_canvas_right.create_image(2, 2, anchor="nw", image=self.region_preview_ref)
+            self._region_preview_showing = str(preview_path)
+        except Exception:
+            pass
+
     def _build_import_tab(self):
         self._build_market_banner(self.import_tab)
         left = Frame(self.import_tab)
@@ -1504,16 +2316,16 @@ class App:
         self._update_tutorial()
 
     def _build_log(self):
+        self.log = Text(self.root, height=9)
+        self.log.pack(side=BOTTOM, fill=BOTH, padx=14, pady=(0, 12))
         row = Frame(self.root)
-        row.pack(fill=X, padx=14)
+        row.pack(side=BOTTOM, fill=X, padx=14)
         self._label(row, "logs", anchor="w").pack(side=LEFT)
         self._button(row, "export_logs", self.export_detailed_log).pack(side=RIGHT)
         self.full_shape_report_button = self._button(row, "export_full_shape_report", self.export_full_shape_report, state="disabled")
         self.full_shape_report_button.pack(side=RIGHT, padx=(0, 8))
         self._label(row, "progress", anchor="e").pack(side=LEFT, padx=(18, 4))
         Label(row, textvariable=self.progress_text, anchor="w", fg="#005a9e").pack(side=LEFT, fill=X, expand=True)
-        self.log = Text(self.root, height=9)
-        self.log.pack(fill=BOTH, padx=14, pady=(0, 12))
 
     def _field(self, parent, key, variable, row, values=None, readonly=False):
         self._label(parent, key, anchor="w").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=5)
@@ -3424,6 +4236,69 @@ class App:
                     self.full_shape_report_button.config(state="normal")
             elif kind == "full_shape_failed_prompt":
                 self.show_full_shape_failure_prompt(payload)
+            elif kind == "region_log":
+                self.log_line(payload)
+            elif kind == "region_progress":
+                self.region_progress.set(payload)
+            elif kind == "region_preview":
+                # Live preview from exe during generation
+                try:
+                    self._region_display_preview(Path(payload))
+                except Exception:
+                    pass
+            elif kind == "region_status":
+                self.region_status.set(payload)
+                self.region_workflow_running = False
+                self._region_update_button_states()
+            elif kind == "region_done":
+                self.region_workflow_running = False
+                self.shutdown_event.clear()
+                result = payload or {}
+                if result.get("ok"):
+                    self.region_status.set(tr(self.lang, "done"))
+                    self.region_progress.set("")
+                    if result.get("new_total"):
+                        self.region_progress.set(f"Total layers: {result['new_total']}")
+                    # Refresh pass history
+                    pass_label = "complete"
+                    if self.region_current_output_dir:
+                        try:
+                            status = region_get_status(self.region_current_output_dir)
+                            self.region_pass_list.delete(0, END)
+                            for i, p in enumerate(status.get("passes", []), 1):
+                                label = f"#{i}: {p.get('layers', 0)} layers"
+                                if p.get("mask"):
+                                    label += " (region)"
+                                else:
+                                    label += " (first pass)"
+                                self.region_pass_list.insert(END, label)
+                            # Capture last pass info for logging
+                            passes = status.get("passes", [])
+                            if passes:
+                                last = passes[-1]
+                                pass_type = "region pass" if last.get("mask") else "first pass"
+                                pass_label = f"Pass #{len(passes)} {pass_type} complete — {last.get('layers', 0)} layers"
+                            self.region_remaining_var.set(str(status.get("remaining", 0)))
+                        except Exception:
+                            pass
+                    self.log_line(f"Region Paint: {pass_label}")
+                    # Auto-clear mask first (same as pressing "Clear Mask" button)
+                    self._region_clear_mask()
+                    # Show preview if available
+                    preview_path = result.get("preview_path")
+                    if not preview_path:
+                        preview_path = Path(self.region_current_output_dir) / "preview.png"
+                    else:
+                        preview_path = Path(preview_path)
+                    if preview_path.exists():
+                        self._region_display_preview(preview_path)
+                else:
+                    self.region_status.set(tr(self.lang, "failed"))
+                    self.region_progress.set(result.get("error", "Unknown error"))
+                    self.log_line(f"Region Paint: failed — {result.get('error', 'Unknown error')}")
+                self._region_update_button_states()
+            elif kind == "region_canvas_update":
+                self._region_display_image(payload)
         if not self.closed:
             self.root.after(100, self._poll_queue)
 

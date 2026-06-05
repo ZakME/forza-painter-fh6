@@ -16,12 +16,12 @@
 </p>
 
 <p align="center">
-  <code>v1.7.0</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code> · <code>EXE de un solo archivo</code>
+  <code>v1.8.1</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code> · <code>EXE de un solo archivo</code>
 </p>
 
 Convierte imágenes PNG/JPG/BMP en capas de Grupo de Vinilo para Forza Horizon 6. La aplicación integra la generación, la vista previa y la importación en una sola ventana de escritorio; los usuarios normales no necesitan Python, `.venv`, archivos batch ni direcciones de memoria manuales.
 
-> **Descarga el EXE:** obtén `forza-painter-fh6-v1.7.0.exe` desde [Releases](https://github.com/bvzrays/forza-painter-fh6/releases) y ejecútalo directamente.
+> **Descarga el EXE:** obtén `forza-painter-fh6-v1.8.1.exe` desde [Releases](https://github.com/bvzrays/forza-painter-fh6/releases) y ejecútalo directamente.
 
 > **Preset Market:** explora imágenes compartidas, presets y paquetes JSON en https://painter6.com o usa el nuevo banner del mercado dentro de la aplicación.
 
@@ -40,7 +40,7 @@ Convierte imágenes PNG/JPG/BMP en capas de Grupo de Vinilo para Forza Horizon 6
 
 ## Inicio rápido
 
-1. Descarga `forza-painter-fh6-v1.7.0.exe` desde [Releases](https://github.com/bvzrays/forza-painter-fh6/releases).
+1. Descarga `forza-painter-fh6-v1.8.1.exe` desde [Releases](https://github.com/bvzrays/forza-painter-fh6/releases).
 2. Coloca el EXE en una carpeta normal con permisos de escritura, por ejemplo `Desktop\forza-painter-fh6`.
 3. Haz doble clic en el EXE. Para importar a FH6, ejecútalo como administrador si Windows bloquea el acceso al proceso.
 4. En FH6, abre `Create Vinyl Group` / `Vinyl Group Editor`, carga una plantilla de esferas y luego usa `Ungroup`.
@@ -145,7 +145,10 @@ Estas carpetas pueden eliminarse cuando la app esté cerrada si quieres restable
 ## Changelog
 
 Aquí solo se conservan las entradas de versiones publicadas. Consulta [CHANGELOG.md](CHANGELOG.md) para ver el changelog que muestra el aviso de actualización de la app.
+### v1.8.1 / 2026-06-05
 
+- Se agregó Pintura Regional (Region Paint) — un nuevo flujo de trabajo de pintura iterativa. Genere un pase de capas base en toda la imagen, luego seleccione regiones (usando herramientas de Rectángulo o Elipse) y refine solo esas áreas con capas adicionales. Incluye gestión de presupuesto de capas, historial de pases, lienzo de vista previa en vivo y exportación de JSON del resultado.
+- Se corrigió el área de registro en la parte inferior de la ventana que quedaba parcialmente oculta detrás de las pestañas del Notebook.
 ### v1.7.0 / 2026-06-01
 
 - Se actualizó la versión de la app a `v1.7.0`; los paquetes de lanzamiento ahora usan `forza-painter-fh6-v1.7.0.exe`.

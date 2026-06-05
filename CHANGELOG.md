@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.8.1 / 2026-06-05
+
+- Added Region Paint — a new iterative painting workflow that generates a base layer pass across the whole image, then lets you select regions (using Rectangle or Ellipse tools) and refine only those areas with additional layers. Includes layer budget management, pass history tracking, live preview on a dedicated right canvas, and result JSON export.
+- Fixed the UI log area at the bottom of the window being partially hidden behind the Notebook tabs, ensuring logs are always visible regardless of which tab is active.
+
 ## v1.8.0 / 2026-06-01
 
 - Updated the app version to `v1.8.0`; release packages now use `forza-painter-fh6-v1.8.0.exe`.
