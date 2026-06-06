@@ -208,6 +208,9 @@ def finalize_region_pass(prep):
     output), merge them with the original full backup, and save.
     """
     import json
+    import time
+
+    _t0 = time.time()
 
     state = prep["state"]
     output_dir = Path(prep["output_dir"])
@@ -222,9 +225,12 @@ def finalize_region_pass(prep):
     num_pruned = prep.get("num_pruned", 0)
 
     # Load original full shapes from backup.
+    _t = time.time()
     original = load_shapes_from_json(backup_json) if backup_json.exists() else []
+    print(f"[finalize_region_pass] load backup shapes: {time.time() - _t:.3f}s ({len(original)} shapes)")
 
     # Find the exe's output (pruned shapes + new shapes).
+    _t = time.time()
     exe_output: list[dict] = []
     if region_target_stem:
         for c in sorted(
@@ -241,42 +247,58 @@ def finalize_region_pass(prep):
 
     if not exe_output:
         exe_output = original  # fallback
+    print(f"[finalize_region_pass] find exe output: {time.time() - _t:.3f}s ({len(exe_output)} shapes)")
 
     # Extract new shapes: shapes at the end beyond the pruned count.
+    _t = time.time()
     exe_type16 = [s for s in exe_output if s.get("type") == 16]
     new_type16 = exe_type16[num_pruned:num_pruned + region_layers]
+    print(f"[finalize_region_pass] extract new shapes: {time.time() - _t:.3f}s "
+          f"(exe_type16={len(exe_type16)}, new_type16={len(new_type16)})")
 
     # Merge: original full shapes + extracted new shapes.
+    _t = time.time()
     bg = original[0] if original else exe_output[0]
     original_type16 = [s for s in original if s.get("type") == 16]
     merged_type16 = original_type16 + new_type16
     merged = [bg] + merged_type16
+    print(f"[finalize_region_pass] merge shapes: {time.time() - _t:.3f}s "
+          f"(total={len(merged)}, type16={len(merged_type16)})")
 
     new_layers = len(new_type16)
     if new_layers == 0:
         new_layers = region_layers
 
     # Save merged result.
+    _t = time.time()
     base_json.write_text(
         json.dumps({"shapes": merged}, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+    print(f"[finalize_region_pass] save merged json: {time.time() - _t:.3f}s")
 
     # Render preview.
+    _t = time.time()
     try:
         render_preview_high_quality(target_png, merged, preview_png, max_preview_size)
     except Exception:
         pass
+    print(f"[finalize_region_pass] render preview: {time.time() - _t:.3f}s")
 
+    _t = time.time()
     state.add_pass(mask_path=str(mask_png), layers=new_layers, json_path=str(base_json))
+    print(f"[finalize_region_pass] state.add_pass: {time.time() - _t:.3f}s")
 
     # Clean up backup and pruned JSON.
+    _t = time.time()
     for p in (backup_json, Path(prep.get("pruned_json", ""))):
         try:
             p.unlink()
         except (OSError, TypeError):
             pass
+    print(f"[finalize_region_pass] cleanup: {time.time() - _t:.3f}s")
 
+    print(f"[finalize_region_pass] TOTAL: {time.time() - _t0:.3f}s")
     return {"ok": True, "new_total": len(merged_type16), "preview_png": str(preview_png)}
 
 

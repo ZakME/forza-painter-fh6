@@ -203,10 +203,9 @@ def render_preview_high_quality(
 ) -> None:
     """Render shapes with sub-pixel float32 RGBA blending (matches Go generator).
 
-    Key improvements over render_preview:
-    - float32 canvas (0-1 range) for proper alpha compositing
-    - Sub-pixel mask generation with +0.5 offset (smoother edges)
-    - Proper alpha channel blending (no black-fringe artifact)
+    Optimizations:
+    - Renders directly at preview resolution (no full-res then downscale).
+    - Pre-computes coordinate grids once (fx, fy) and reuses across all shapes.
     """
     target_path = Path(target_path)
     output_path = Path(output_path)
@@ -219,16 +218,25 @@ def render_preview_high_quality(
     image_w = int(bg_data[2])
     image_h = int(bg_data[3])
 
-    # Load target image as float32 RGBA canvas (0-1).
+    # --- Determine canvas size: render directly at preview resolution ---
+    max_dim = max(image_w, image_h)
+    if max_dim > max_preview_size:
+        scale = max_preview_size / max_dim
+    else:
+        scale = 1.0
+    pw = max(1, int(image_w * scale))
+    ph = max(1, int(image_h * scale))
+
+    # Load target image as float32 RGBA canvas (0-1), already at preview size.
     try:
         from PIL import Image as PILImage
         target_img = PILImage.open(target_path).convert("RGBA")
-        if target_img.size != (image_w, image_h):
-            target_img = target_img.resize((image_w, image_h), PILImage.LANCZOS)
+        if target_img.size != (pw, ph):
+            target_img = target_img.resize((pw, ph), PILImage.LANCZOS)
         canvas = np.array(target_img, dtype=np.float32) / 255.0
     except Exception:
         # Fallback: start with transparent canvas.
-        canvas = np.zeros((image_h, image_w, 4), dtype=np.float32)
+        canvas = np.zeros((ph, pw, 4), dtype=np.float32)
         bg_color = shapes[0].get("color", [0, 0, 0, 0])
         if len(bg_color) == 4 and int(bg_color[3]) > 0:
             canvas[:, :, 0] = int(bg_color[0]) / 255.0
@@ -236,7 +244,12 @@ def render_preview_high_quality(
             canvas[:, :, 2] = int(bg_color[2]) / 255.0
             canvas[:, :, 3] = int(bg_color[3]) / 255.0
 
-    # Draw each shape with sub-pixel float32 alpha blending.
+    # --- Pre-compute coordinate grids once for all shapes (plan 2) ---
+    yy, xx = np.mgrid[:ph, :pw]
+    fx = xx.astype(np.float32) + 0.5
+    fy = yy.astype(np.float32) + 0.5
+
+    # --- Draw each shape with sub-pixel float32 alpha blending ---
     for shape in shapes[1:]:
         color = shape.get("color", [])
         if len(color) < 4 or int(color[3]) <= 0:
@@ -248,7 +261,10 @@ def render_preview_high_quality(
         shape_type = int(shape["type"])
         data = shape["data"]
 
-        mask = _make_shape_mask_f32(shape_type, data, image_w, image_h)
+        # Scale shape coordinates to preview size.
+        scaled_data = _scale_shape_data(shape_type, data, scale)
+
+        mask = _make_shape_mask_f32(shape_type, scaled_data, fx, fy)
         if mask is None:
             continue
 
@@ -259,32 +275,31 @@ def render_preview_high_quality(
         canvas[mask, 2] = canvas[mask, 2] * inv_a + b * a
         canvas[mask, 3] = canvas[mask, 3] * inv_a + a
 
-    # Convert back to uint8 RGBA.
+    # Convert back to uint8 RGBA and save (no resize needed — already at preview size).
     result = (np.clip(canvas * 255.0, 0, 255)).astype(np.uint8)
-
-    # Resize if needed.
-    if max(image_w, image_h) > max_preview_size:
-        ratio = max_preview_size / max(image_w, image_h)
-        new_w = max(1, int(image_w * ratio))
-        new_h = max(1, int(image_h * ratio))
-        from PIL import Image as PILImage
-        pil_img = PILImage.fromarray(result, "RGBA")
-        pil_img = pil_img.resize((new_w, new_h), PILImage.LANCZOS)
-    else:
-        from PIL import Image as PILImage
-        pil_img = PILImage.fromarray(result, "RGBA")
+    from PIL import Image as PILImage
+    pil_img = PILImage.fromarray(result, "RGBA")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     pil_img.save(str(output_path), "PNG")
 
 
-def _make_shape_mask_f32(shape_type: int, data: list, w: int, h: int):
-    """Generate a boolean mask for a shape with sub-pixel precision."""
-    yy, xx = np.mgrid[:h, :w]
-    # +0.5 sub-pixel offset — matches Go generator's x+0.5 / y+0.5
-    fx = xx.astype(np.float32) + 0.5
-    fy = yy.astype(np.float32) + 0.5
+def _scale_shape_data(shape_type: int, data: list, scale: float) -> list:
+    """Scale shape coordinates by *scale* (x, y, w, h are scaled; rot_deg unchanged)."""
+    if shape_type == 1:  # Rectangle: [x, y, w, h]
+        return [data[0] * scale, data[1] * scale, data[2] * scale, data[3] * scale]
+    elif shape_type == 16:  # Rotated Ellipse: [x, y, w, h, rot_deg]
+        return [data[0] * scale, data[1] * scale, data[2] * scale, data[3] * scale, data[4]]
+    return data
 
+
+def _make_shape_mask_f32(shape_type: int, data: list, fx: "np.ndarray", fy: "np.ndarray"):
+    """Generate a boolean mask for a shape with sub-pixel precision.
+
+    *fx* and *fy* are pre-computed coordinate grids (float32) covering the
+    canvas, already offset by +0.5 for sub-pixel accuracy.  They should be
+    computed once and reused across all shapes.
+    """
     if shape_type == 1:  # Rectangle
         x, y, sw, sh = [float(v) for v in data]
         return (fx >= x - sw / 2.0) & (fx <= x + sw / 2.0) & (fy >= y - sh / 2.0) & (fy <= y + sh / 2.0)
