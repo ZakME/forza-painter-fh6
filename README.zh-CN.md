@@ -15,12 +15,12 @@
 </p>
 
 <p align="center">
-  <code>v1.8.2</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code> · <code>单文件 EXE</code>
+  <code>v1.8.3</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code> · <code>单文件 EXE</code>
 </p>
 
 把 PNG/JPG/BMP 图片转换成 Forza Horizon 6 的 Vinyl Group 图层。软件内完成生成、预览和导入，普通用户不需要 Python、`.venv`、批处理文件，也不需要手动填写内存地址。
 
-> **下载 EXE：** 从 [Releases](https://github.com/bvzrays/forza-painter-fh6/releases) 下载 `forza-painter-fh6-v1.8.1.exe`，直接运行。
+> **下载 EXE：** 从 [Releases](https://github.com/bvzrays/forza-painter-fh6/releases) 下载 `forza-painter-fh6-v1.8.3.exe`，直接运行。
 
 > **预设市场：** 可以在 https://painter6.com 浏览玩家分享的图片、预设和 JSON 包，也可以通过软件内的新市场横幅直接打开。
 
@@ -39,7 +39,7 @@
 
 ## 快速开始
 
-1. 从 [Releases](https://github.com/bvzrays/forza-painter-fh6/releases) 下载 `forza-painter-fh6-v1.8.1.exe`。
+1. 从 [Releases](https://github.com/bvzrays/forza-painter-fh6/releases) 下载 `forza-painter-fh6-v1.8.3.exe`。
 2. 把 EXE 放在普通可写目录里，例如 `Desktop\forza-painter-fh6`。
 3. 双击 EXE 启动。导入 FH6 时如果被 Windows 拦截进程访问，请用管理员身份运行 EXE。
 4. 在游戏里进入 `Create Vinyl Group` / `Vinyl Group Editor`，加载球形模板并 `Ungroup`。
@@ -156,6 +156,11 @@ EXE 旁边可能出现这些外部文件夹：
 ## 更新日志
 
 这里仅保留带版本号的发布记录。用于软件更新弹窗的完整记录见 [CHANGELOG.md](CHANGELOG.md)。
+
+### v1.8.3 / 2026-06-06
+
+- 在区域绘制（Region Paint）画布中新增**热力图**标签页，以颜色标尺展示生成图像中各区域的形状密度。每次轮次完成后自动生成热力图，并缓存以便即时切换。
+- 显著提升区域绘制预览图像的生成速度。
 
 ### v1.8.2 / 2026-06-06
 

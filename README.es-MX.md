@@ -16,12 +16,12 @@
 </p>
 
 <p align="center">
-  <code>v1.8.2</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code> · <code>EXE de un solo archivo</code>
+  <code>v1.8.3</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code> · <code>EXE de un solo archivo</code>
 </p>
 
 Convierte imágenes PNG/JPG/BMP en capas de Grupo de Vinilo para Forza Horizon 6. La aplicación integra la generación, la vista previa y la importación en una sola ventana de escritorio; los usuarios normales no necesitan Python, `.venv`, archivos batch ni direcciones de memoria manuales.
 
-> **Descarga el EXE:** obtén `forza-painter-fh6-v1.8.1.exe` desde [Releases](https://github.com/bvzrays/forza-painter-fh6/releases) y ejecútalo directamente.
+> **Descarga el EXE:** obtén `forza-painter-fh6-v1.8.3.exe` desde [Releases](https://github.com/bvzrays/forza-painter-fh6/releases) y ejecútalo directamente.
 
 > **Preset Market:** explora imágenes compartidas, presets y paquetes JSON en https://painter6.com o usa el nuevo banner del mercado dentro de la aplicación.
 
@@ -40,7 +40,7 @@ Convierte imágenes PNG/JPG/BMP en capas de Grupo de Vinilo para Forza Horizon 6
 
 ## Inicio rápido
 
-1. Descarga `forza-painter-fh6-v1.8.1.exe` desde [Releases](https://github.com/bvzrays/forza-painter-fh6/releases).
+1. Descarga `forza-painter-fh6-v1.8.3.exe` desde [Releases](https://github.com/bvzrays/forza-painter-fh6/releases).
 2. Coloca el EXE en una carpeta normal con permisos de escritura, por ejemplo `Desktop\forza-painter-fh6`.
 3. Haz doble clic en el EXE. Para importar a FH6, ejecútalo como administrador si Windows bloquea el acceso al proceso.
 4. En FH6, abre `Create Vinyl Group` / `Vinyl Group Editor`, carga una plantilla de esferas y luego usa `Ungroup`.
@@ -157,6 +157,11 @@ Estas carpetas pueden eliminarse cuando la app esté cerrada si quieres restable
 ## Changelog
 
 Aquí solo se conservan las entradas de versiones publicadas. Consulta [CHANGELOG.md](CHANGELOG.md) para ver el changelog que muestra el aviso de actualización de la app.
+### v1.8.3 / 2026-06-06
+
+- Se agregó una pestaña de **Mapa de calor** al lienzo de Pintura Regional, que muestra la densidad de formas en la imagen generada con una barra de escala de color. El mapa se genera automáticamente después de cada pase y se almacena en caché para cambiar de pestaña al instante.
+- Se mejoró significativamente la velocidad de generación de la vista previa en Pintura Regional.
+
 ### v1.8.2 / 2026-06-06
 
 - Se eliminó el control de Suavizado (Feather) de las herramientas de selección del Paso 3 en Pintura Regional. Las máscaras de selección ahora siempre tienen borde duro (0 suavizado), lo que corrige los problemas que el suavizado causaba en la función Pintar Región Seleccionada.

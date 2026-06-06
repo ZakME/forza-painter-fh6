@@ -16,12 +16,12 @@
 </p>
 
 <p align="center">
-  <code>v1.8.2</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code> · <code>One-file EXE</code>
+  <code>v1.8.3</code> · <code>Windows</code> · <code>Forza Horizon 6</code> · <code>GPU/OpenCL</code> · <code>One-file EXE</code>
 </p>
 
 Convert PNG/JPG/BMP images into Forza Horizon 6 Vinyl Group layers. The app handles generation, preview, and import in one desktop window; normal users do not need Python, `.venv`, batch files, or manual memory addresses.
 
-> **Download the EXE:** get `forza-painter-fh6-v1.8.2.exe` from [Releases](https://github.com/bvzrays/forza-painter-fh6/releases) and run it directly.
+> **Download the EXE:** get `forza-painter-fh6-v1.8.3.exe` from [Releases](https://github.com/bvzrays/forza-painter-fh6/releases) and run it directly.
 
 > **Preset Market:** browse shared images, presets, and JSON packages at https://painter6.com or use the new in-app market banner.
 
@@ -41,7 +41,7 @@ Convert PNG/JPG/BMP images into Forza Horizon 6 Vinyl Group layers. The app hand
 
 ## Quick Start
 
-1. Download `forza-painter-fh6-v1.8.2.exe` from [Releases](https://github.com/bvzrays/forza-painter-fh6/releases).
+1. Download `forza-painter-fh6-v1.8.3.exe` from [Releases](https://github.com/bvzrays/forza-painter-fh6/releases).
 2. Put the EXE in a normal writable folder, for example `Desktop\forza-painter-fh6`.
 3. Double-click the EXE. For FH6 import, run it as administrator if Windows blocks process access.
 4. In FH6, open `Create Vinyl Group` / `Vinyl Group Editor`, load a sphere template, then `Ungroup` it.
@@ -175,6 +175,11 @@ These folders can be deleted when the app is closed if you want to reset local r
 ## Changelog
 
 Only versioned release entries are kept here. See [CHANGELOG.md](CHANGELOG.md) for the app update prompt changelog.
+
+### v1.8.3 / 2026-06-06
+
+- Added a **Heatmap** tab to the Region Paint canvas, showing shape density across the generated image with a colour-scale bar. The heatmap is automatically generated after each pass and cached for instant tab switching.
+- Significantly improved Region Paint preview image generation speed.
 
 ### v1.8.2 / 2026-06-06
 

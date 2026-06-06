@@ -220,6 +220,38 @@ def add_colorbar(heatmap, max_val, cv2, np):
     return padded
 
 
+def generate_standalone_heatmap(geometry_json_path, output_png_path, colormap_name="COLORMAP_JET"):
+    """Convenience function: generate a standalone heatmap PNG (with colorbar)
+    from a geometry JSON file.  Returns the Path to the written PNG, or None
+    on failure.
+
+    This is the function intended for programmatic use from other modules
+    (e.g. the Region Paint workflow in app.py).
+    """
+    loaded = load_cv2()
+    if not loaded:
+        raise RuntimeError("OpenCV (cv2) and NumPy are required but could not be loaded.")
+    cv2, np = loaded
+
+    data = load_normalized_geometry(str(geometry_json_path))
+    shapes = data["shapes"]
+    if len(shapes) < 2:
+        raise ValueError("No drawable shapes found in the geometry file.")
+
+    bg_data = shapes[0]["data"]
+    image_w = int(bg_data[2])
+    image_h = int(bg_data[3])
+
+    accumulator = build_accumulator(shapes, image_w, image_h, cv2, np)
+    heatmap_raw = render_heatmap_image(accumulator, cv2, np, colormap_name)
+    heatmap_with_bar = add_colorbar(heatmap_raw, accumulator.max(), cv2, np)
+
+    output_png_path = Path(output_png_path)
+    output_png_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(output_png_path), heatmap_with_bar)
+    return output_png_path
+
+
 def render_comparison(preview, heatmap_with_bar, cv2, np):
     """Horizontally concatenate preview and heatmap (with colorbar) side by side."""
     h1, w1 = preview.shape[:2]
