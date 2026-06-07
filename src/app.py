@@ -893,6 +893,8 @@ class App:
         self.region_canvas_overlay_ref = None
         self._region_cached_pil = None       # cached full-res PIL image
         self._region_cached_pil_path = None  # path the cached image is for
+        self._region_cached_display_pil = None  # cached resized display image
+        self._region_cached_display_size = None  # (w, h) of the cached display image
         self.region_drag_start = None
         self.region_drag_mode: str | None = None  # "draw", "move", "rotate"
         self._region_move_snapshot: list[float] | None = None  # original coords when moving
@@ -1639,6 +1641,8 @@ class App:
 
     def _region_canvas_configure(self, _event=None):
         """Redraw the image/preview when canvases resize."""
+        self._region_cached_display_pil = None  # invalidate display cache on resize
+        self._region_cached_display_size = None
         if self.region_workflow_running:
             return
         # Redraw original image on left canvas if an image is selected
@@ -1703,6 +1707,8 @@ class App:
             if self._region_cached_pil is None or self._region_cached_pil_path != image_path:
                 self._region_cached_pil = Image.open(image_path).convert("RGBA")
                 self._region_cached_pil_path = image_path
+                self._region_cached_display_pil = None  # invalidate display cache
+                self._region_cached_display_size = None
             img = self._region_cached_pil.copy()
             cw = self.region_canvas_left.winfo_width() or 300
             ch = self.region_canvas_left.winfo_height() or 500
@@ -1934,14 +1940,21 @@ class App:
         if self._region_cached_pil is None or self._region_cached_pil_path != image_path:
             self._region_cached_pil = Image.open(image_path).convert("RGBA")
             self._region_cached_pil_path = image_path
-        img = self._region_cached_pil.copy()
+        img = self._region_cached_pil
         cw = self.region_canvas.winfo_width() or 600
         ch = self.region_canvas.winfo_height() or 500
         display_size = min(cw - 4, ch - 4, 600)
         ratio = display_size / max(img.width, img.height)
         new_w = max(1, int(img.width * ratio))
         new_h = max(1, int(img.height * ratio))
-        img = img.resize((new_w, new_h), Image.LANCZOS)
+        # Use cached display-size image when canvas size hasn't changed
+        cur_display = (new_w, new_h)
+        if self._region_cached_display_pil is not None and self._region_cached_display_size == cur_display:
+            img = self._region_cached_display_pil
+        else:
+            img = img.copy().resize((new_w, new_h), Image.LANCZOS)
+            self._region_cached_display_pil = img
+            self._region_cached_display_size = cur_display
         # Draw red overlay for each shape
         overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
         # Try OpenCV for rotated shapes
@@ -1971,7 +1984,7 @@ class App:
                 if tool == "rect":
                     if rotation != 0:
                         # Rotated rectangle via boxPoints
-                        rect = ((cx, cy), (hw * 2, hh * 2), -rotation)  # cv2 RotatedRect uses counter-intuitive angle
+                        rect = ((cx, cy), (hw * 2, hh * 2), rotation)
                         box = cv2.boxPoints(rect).astype(np.int32)
                         cv2.fillPoly(overlay_np, [box], fill_color)
                     else:
@@ -1982,13 +1995,13 @@ class App:
                     # cv2.ellipse: axes are (semi-major, semi-minor), use (hw, hh)
                     cv2.ellipse(overlay_np,
                                 (int(cx), int(cy)), (int(hw), int(hh)),
-                                -rotation, 0.0, 360.0,
+                                rotation, 0.0, 360.0,
                                 fill_color, thickness=-1)
                 # Draw selection highlight outline
                 if is_selected:
                     outline_color = (255, 255, 0, 255)  # Yellow outline
                     if tool == "rect" and rotation != 0:
-                        rect = ((cx, cy), (hw * 2, hh * 2), -rotation)
+                        rect = ((cx, cy), (hw * 2, hh * 2), rotation)
                         box = cv2.boxPoints(rect).astype(np.int32)
                         cv2.polylines(overlay_np, [box], isClosed=True, color=outline_color, thickness=2)
                     elif tool == "rect":
@@ -1996,7 +2009,7 @@ class App:
                                       outline_color, thickness=2)
                     else:
                         cv2.ellipse(overlay_np, (int(cx), int(cy)), (int(hw), int(hh)),
-                                    -rotation, 0.0, 360.0, outline_color, thickness=2)
+                                    rotation, 0.0, 360.0, outline_color, thickness=2)
             # Convert numpy (BGRA) → PIL RGBA overlay
             # cv2 uses BGRA, PIL uses RGBA: swap R and B channels
             overlay_np_rgba = np.zeros_like(overlay_np)

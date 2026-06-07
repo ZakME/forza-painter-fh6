@@ -64,7 +64,7 @@ def mask_from_canvas_shapes(
                 cy = (y1 + y2) / 2.0
                 hw = abs(x2 - x1) / 2.0
                 hh = abs(y2 - y1) / 2.0
-                rect = ((cx, cy), (hw * 2, hh * 2), -rotation)
+                rect = ((cx, cy), (hw * 2, hh * 2), rotation)
                 box = cv2_mod.boxPoints(rect).astype(np_mod.int32)
                 cv2_mod.fillPoly(cv2_mask, [box], 255)
             else:
@@ -80,7 +80,7 @@ def mask_from_canvas_shapes(
                 cv2_mod.ellipse(cv2_mask,
                                 (int(round(cx)), int(round(cy))),
                                 (int(round(hw)), int(round(hh))),
-                                -rotation, 0.0, 360.0, 255, thickness=-1)
+                                rotation, 0.0, 360.0, 255, thickness=-1)
             else:
                 draw.ellipse([x1, y1, x2, y2], fill=255)
 
