@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.8.4 / 2026-06-07
+
+- Region Paint selection shapes (rectangle and ellipse) now support **drag to move**, **corner-handle resize**, and **rotation** via slider, scroll wheel, entry box, or on-canvas rotation handle for precise region refinement.
+- Added a new recommended preset that produces great results with relatively low compute power.
+
 ## v1.8.3 / 2026-06-06
 
 - Added a **Heatmap** tab to the Region Paint right canvas. After each pass (First Pass / Paint Selected Region) a shape-density heatmap is automatically generated from the geometry JSON and displayed alongside the rendered preview. The two tabs share a cache so switching is instant.

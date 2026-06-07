@@ -27,6 +27,7 @@ def mask_from_canvas_shapes(
     Each shape dict must have:
         ``"tool"``: one of ``"rect"``, ``"ellipse"``, ``"brush"``, ``"polygon"``
         ``"coords"``: tool-specific coordinate list (in *canvas* pixels)
+        ``"rotation"``: (rect/ellipse) rotation in degrees (default 0)
         ``"brush_size"``: (brush only) stroke width in canvas pixels
 
     Coordinates are divided by *scale* to map from canvas space to working
@@ -35,20 +36,53 @@ def mask_from_canvas_shapes(
     mask = create_blank_mask(width, height)
     draw = ImageDraw.Draw(mask)
 
+    # Try OpenCV for rotated shapes
+    try:
+        from utils import load_cv2
+        loaded = load_cv2()
+        cv2_mod, np_mod = (loaded if loaded else (None, None))
+    except Exception:
+        cv2_mod, np_mod = None, None
+
+    has_rotated = any(shape.get("rotation", 0) != 0 for shape in shapes)
+    cv2_mask = None
+    if cv2_mod is not None and np_mod is not None and has_rotated:
+        cv2_mask = np_mod.zeros((height, width), dtype=np_mod.uint8)
+
     for shape in shapes:
         tool = shape.get("tool", "")
         coords = shape.get("coords", [])
+        rotation = shape.get("rotation", 0)
 
         # Scale coords from canvas 鈫?working pixels.
         scaled: list[float] = [c / scale for c in coords]
 
         if tool == "rect" and len(scaled) >= 4:
             x1, y1, x2, y2 = scaled[:4]
-            draw.rectangle([x1, y1, x2, y2], fill=255)
+            if rotation != 0 and cv2_mask is not None:
+                cx = (x1 + x2) / 2.0
+                cy = (y1 + y2) / 2.0
+                hw = abs(x2 - x1) / 2.0
+                hh = abs(y2 - y1) / 2.0
+                rect = ((cx, cy), (hw * 2, hh * 2), rotation)
+                box = cv2_mod.boxPoints(rect).astype(np_mod.int32)
+                cv2_mod.fillPoly(cv2_mask, [box], 255)
+            else:
+                draw.rectangle([x1, y1, x2, y2], fill=255)
 
         elif tool == "ellipse" and len(scaled) >= 4:
             x1, y1, x2, y2 = scaled[:4]
-            draw.ellipse([x1, y1, x2, y2], fill=255)
+            if rotation != 0 and cv2_mask is not None:
+                cx = (x1 + x2) / 2.0
+                cy = (y1 + y2) / 2.0
+                hw = abs(x2 - x1) / 2.0
+                hh = abs(y2 - y1) / 2.0
+                cv2_mod.ellipse(cv2_mask,
+                                (int(round(cx)), int(round(cy))),
+                                (int(round(hw)), int(round(hh))),
+                                rotation, 0.0, 360.0, 255, thickness=-1)
+            else:
+                draw.ellipse([x1, y1, x2, y2], fill=255)
 
         elif tool == "brush":
             brush_size = shape.get("brush_size", 15) / scale
@@ -68,6 +102,12 @@ def mask_from_canvas_shapes(
             points = [(scaled[i], scaled[i + 1]) for i in range(0, len(scaled) - 1, 2)]
             if len(points) >= 3:
                 draw.polygon(points, fill=255)
+
+    # Merge OpenCV mask back into PIL mask
+    if cv2_mask is not None:
+        mask_np = np_mod.array(mask)
+        mask_np[cv2_mask > 0] = 255
+        mask = Image.fromarray(mask_np, mode="L")
 
     return mask
 

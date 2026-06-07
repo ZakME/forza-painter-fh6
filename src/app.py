@@ -884,13 +884,24 @@ class App:
         self.region_remaining_var = StringVar(value="2000")
         self.region_tool = StringVar(value="rect")
         self.region_shapes: list[dict] = []
+        self.region_selected_index: int | None = None
+        self.region_rotation_var = IntVar(value=0)
+        self.region_rotation_display = StringVar(value="0°")
         self.region_brush_size = IntVar(value=15)
         self.region_mask: "Image.Image | None" = None
         self.region_canvas_image_ref = None
         self.region_canvas_overlay_ref = None
         self._region_cached_pil = None       # cached full-res PIL image
         self._region_cached_pil_path = None  # path the cached image is for
+        self._region_cached_display_pil = None  # cached resized display image
+        self._region_cached_display_size = None  # (w, h) of the cached display image
         self.region_drag_start = None
+        self.region_drag_mode: str | None = None  # "draw", "move", "rotate"
+        self._region_move_snapshot: list[float] | None = None  # original coords when moving
+        self._region_resize_corner: int | None = None  # 0=tl, 1=tr, 2=bl, 3=br
+        self._region_resize_anchor_x: float = 0
+        self._region_resize_anchor_y: float = 0
+        self._region_handle_ids: list[int] = []  # tkinter canvas item IDs for rotation handle
         self.region_rubber_id = None
         self.region_poly_points: list[float] = []
         self.region_current_output_dir: str = ""
@@ -1520,6 +1531,28 @@ class App:
             self.translated.append((btn, key, "text"))
         self._button(tool_row, "region_tool_clear", self._region_clear_mask).pack(side=LEFT, padx=(8, 2))
 
+        # Rotation control (visible when a shape is selected)
+        rot_row = Frame(step3)
+        rot_row.pack(fill=X, padx=10, pady=(0, 8))
+        rot_label = Label(rot_row, text=tr(self.lang, "region_rotation"), bg=self._parent_bg(rot_row))
+        rot_label.pack(side=LEFT)
+        self.translated.append((rot_label, "region_rotation", "text"))
+        self.region_rotation_slider = ttk.Scale(
+            rot_row, from_=-180, to=180, orient="horizontal",
+            variable=self.region_rotation_var, state="disabled",
+            command=self._region_on_rotation_changed,
+        )
+        self.region_rotation_slider.pack(side=LEFT, fill=X, expand=True, padx=6)
+        self.region_rotation_label = Entry(
+            rot_row, textvariable=self.region_rotation_display,
+            bg=Theme.INPUT, fg=Theme.TEXT, insertbackground=Theme.ACCENT,
+            width=5, justify="right", state="disabled",
+            relief="solid", bd=1,
+        )
+        self.region_rotation_label.pack(side=LEFT)
+        self.region_rotation_label.bind("<Return>", self._region_rotation_entry_apply)
+        self.region_rotation_label.bind("<FocusOut>", self._region_rotation_entry_apply)
+
         # Step 4 — Actions
         step4 = ttk.LabelFrame(left_outer, text=tr(self.lang, "region_step_actions"))
         self.translated.append((step4, "region_step_actions", "text"))
@@ -1596,6 +1629,10 @@ class App:
         self.region_canvas.bind("<Motion>", self._region_canvas_motion)
         self.region_canvas.bind("<Configure>", self._region_canvas_configure)
         self.region_canvas_right.bind("<Configure>", self._region_canvas_configure)
+        # Scroll wheel to rotate selected shape
+        self.region_canvas.bind("<MouseWheel>", self._region_on_mousewheel)
+        self.region_canvas.bind("<Button-4>", self._region_on_mousewheel)
+        self.region_canvas.bind("<Button-5>", self._region_on_mousewheel)
 
         if self.settings:
             self._region_update_profile_description()  # sync stopAt → total budget
@@ -1607,6 +1644,8 @@ class App:
 
     def _region_canvas_configure(self, _event=None):
         """Redraw the image/preview when canvases resize."""
+        self._region_cached_display_pil = None  # invalidate display cache on resize
+        self._region_cached_display_size = None
         if self.region_workflow_running:
             return
         # Redraw original image on left canvas if an image is selected
@@ -1671,6 +1710,8 @@ class App:
             if self._region_cached_pil is None or self._region_cached_pil_path != image_path:
                 self._region_cached_pil = Image.open(image_path).convert("RGBA")
                 self._region_cached_pil_path = image_path
+                self._region_cached_display_pil = None  # invalidate display cache
+                self._region_cached_display_size = None
             img = self._region_cached_pil.copy()
             cw = self.region_canvas_left.winfo_width() or 300
             ch = self.region_canvas_left.winfo_height() or 500
@@ -1713,38 +1754,268 @@ class App:
         except Exception:
             return 1.0
 
+    def _region_hit_test(self, x: float, y: float) -> int | None:
+        """Return the index of the shape at canvas point (x, y), or None.
+        Tests shapes in reverse order so the top-most shape wins."""
+        import math
+        for i in range(len(self.region_shapes) - 1, -1, -1):
+            shape = self.region_shapes[i]
+            tool = shape.get("tool", "")
+            coords = shape.get("coords", [])
+            if tool not in ("rect", "ellipse") or len(coords) < 4:
+                continue
+            cx = (coords[0] + coords[2]) / 2.0
+            cy = (coords[1] + coords[3]) / 2.0
+            hw = abs(coords[2] - coords[0]) / 2.0
+            hh = abs(coords[3] - coords[1]) / 2.0
+            rotation = shape.get("rotation", 0)
+            # Transform point into shape-local (unrotated) space
+            if rotation != 0:
+                rad = math.radians(-rotation)
+                cos_r, sin_r = math.cos(rad), math.sin(rad)
+                dx = x - cx
+                dy = y - cy
+                lx = dx * cos_r - dy * sin_r
+                ly = dx * sin_r + dy * cos_r
+            else:
+                lx = x - cx
+                ly = y - cy
+            if tool == "rect":
+                if abs(lx) <= hw and abs(ly) <= hh:
+                    return i
+            else:  # ellipse
+                if hw > 0 and hh > 0:
+                    if (lx * lx) / (hw * hw) + (ly * ly) / (hh * hh) <= 1.0:
+                        return i
+        return None
+
+    def _region_hit_test_handle(self, x: float, y: float) -> bool:
+        """Return True if point (x, y) is on the rotation handle of the selected shape."""
+        if self.region_selected_index is None or self.region_selected_index >= len(self.region_shapes):
+            return False
+        shape = self.region_shapes[self.region_selected_index]
+        coords = shape.get("coords", [])
+        if len(coords) < 4:
+            return False
+        import math
+        cx = (coords[0] + coords[2]) / 2.0
+        cy = (coords[1] + coords[3]) / 2.0
+        hh = abs(coords[3] - coords[1]) / 2.0
+        rotation = shape.get("rotation", 0)
+        rad = math.radians(rotation)
+        handle_offset = 14
+        hx = cx + math.sin(rad) * (hh + handle_offset)
+        hy = cy - math.cos(rad) * (hh + handle_offset)
+        return math.hypot(x - hx, y - hy) <= 8
+
+    def _region_hit_test_resize(self, x: float, y: float) -> int | None:
+        """Return corner index (0=tl, 1=tr, 2=bl, 3=br) if (x,y) is on a resize handle."""
+        if self.region_selected_index is None or self.region_selected_index >= len(self.region_shapes):
+            return None
+        shape = self.region_shapes[self.region_selected_index]
+        coords = shape.get("coords", [])
+        if len(coords) < 4:
+            return None
+        import math
+        cx = (coords[0] + coords[2]) / 2.0
+        cy = (coords[1] + coords[3]) / 2.0
+        rotation = shape.get("rotation", 0)
+        rad = math.radians(rotation)
+        corners = [
+            (coords[0], coords[1]),
+            (coords[2], coords[1]),
+            (coords[0], coords[3]),
+            (coords[2], coords[3]),
+        ]
+        for i, (ux, uy) in enumerate(corners):
+            dx = ux - cx
+            dy = uy - cy
+            rx = cx + dx * math.cos(rad) - dy * math.sin(rad)
+            ry = cy + dx * math.sin(rad) + dy * math.cos(rad)
+            if abs(x - rx) <= 5 and abs(y - ry) <= 5:
+                return i
+        return None
+
     def _region_canvas_press(self, event):
         tool = self.region_tool.get()
-        if tool in ("rect", "ellipse"):
+        if tool not in ("rect", "ellipse"):
+            return
+
+        # 1. If a shape is selected, check for rotation-handle click
+        if self.region_selected_index is not None:
+            if self._region_hit_test_handle(event.x, event.y):
+                self.region_drag_mode = "rotate"
+                self.region_drag_start = (event.x, event.y)
+                return
+
+            # 1b. Check for resize-handle click
+            corner = self._region_hit_test_resize(event.x, event.y)
+            if corner is not None:
+                self.region_drag_mode = "resize"
+                self.region_drag_start = (event.x, event.y)
+                self._region_resize_corner = corner
+                # Store opposite corner as anchor
+                shape = self.region_shapes[self.region_selected_index]
+                coords = shape["coords"]
+                opposite = {0: 3, 1: 2, 2: 1, 3: 0}[corner]
+                opp_corners = [
+                    (coords[0], coords[1]),
+                    (coords[2], coords[1]),
+                    (coords[0], coords[3]),
+                    (coords[2], coords[3]),
+                ]
+                self._region_resize_anchor_x = opp_corners[opposite][0]
+                self._region_resize_anchor_y = opp_corners[opposite][1]
+                return
+
+        # 2. Check if clicking on any shape body
+        hit = self._region_hit_test(event.x, event.y)
+        if hit is not None:
+            # Select and prepare for move
+            self.region_selected_index = hit
+            shape = self.region_shapes[hit]
+            angle = shape.get("rotation", 0)
+            self.region_rotation_var.set(angle)
+            self.region_rotation_display.set(f"{angle}°")
+            self.region_rotation_slider.config(state="normal")
+            self.region_rotation_label.config(state="normal")
+            self.region_drag_mode = "move"
             self.region_drag_start = (event.x, event.y)
+            self._region_move_snapshot = list(shape["coords"])
+            self._region_redraw_overlay()
+            return
+
+        # 3. Click on empty space — deselect and prepare for new-shape drag
+        self.region_selected_index = None
+        self.region_rotation_var.set(0)
+        self.region_rotation_display.set("0°")
+        self.region_rotation_slider.config(state="disabled")
+        self.region_rotation_label.config(state="disabled")
+        self.region_drag_mode = "draw"
+        self.region_drag_start = (event.x, event.y)
+        self._region_redraw_overlay()
 
     def _region_canvas_drag(self, event):
+        import math
+
+        if self.region_drag_mode == "move":
+            if self.region_selected_index is not None and self._region_move_snapshot:
+                dx = event.x - self.region_drag_start[0]
+                dy = event.y - self.region_drag_start[1]
+                orig = self._region_move_snapshot
+                self.region_shapes[self.region_selected_index]["coords"] = [
+                    orig[0] + dx, orig[1] + dy,
+                    orig[2] + dx, orig[3] + dy,
+                ]
+                self._region_redraw_overlay()
+            return
+
+        if self.region_drag_mode == "rotate":
+            if self.region_selected_index is not None:
+                shape = self.region_shapes[self.region_selected_index]
+                coords = shape["coords"]
+                cx = (coords[0] + coords[2]) / 2.0
+                cy = (coords[1] + coords[3]) / 2.0
+                angle = math.degrees(math.atan2(event.x - cx, -(event.y - cy)))
+                angle = round(angle)
+                # Normalize to [-180, 180]
+                angle = ((angle + 180) % 360) - 180
+                shape["rotation"] = angle
+                self.region_rotation_var.set(angle)
+                self.region_rotation_display.set(f"{angle}°")
+                self._region_redraw_overlay()
+            return
+
+        if self.region_drag_mode == "resize":
+            if self.region_selected_index is not None and self._region_resize_corner is not None:
+                shape = self.region_shapes[self.region_selected_index]
+                coords = shape["coords"]
+                cx = (coords[0] + coords[2]) / 2.0
+                cy = (coords[1] + coords[3]) / 2.0
+                rotation = shape.get("rotation", 0)
+                # Unrotate mouse position into shape-local space
+                if rotation != 0:
+                    rad_inv = math.radians(-rotation)
+                    dx = event.x - cx
+                    dy = event.y - cy
+                    lx = cx + dx * math.cos(rad_inv) - dy * math.sin(rad_inv)
+                    ly = cy + dx * math.sin(rad_inv) + dy * math.cos(rad_inv)
+                else:
+                    lx, ly = event.x, event.y
+                anchor_x = self._region_resize_anchor_x
+                anchor_y = self._region_resize_anchor_y
+                corner = self._region_resize_corner
+                if corner == 0:      # tl
+                    x1, y1, x2, y2 = lx, ly, anchor_x, anchor_y
+                elif corner == 1:    # tr
+                    x1, y1, x2, y2 = anchor_x, ly, lx, anchor_y
+                elif corner == 2:    # bl
+                    x1, y1, x2, y2 = lx, anchor_y, anchor_x, ly
+                else:                # br
+                    x1, y1, x2, y2 = anchor_x, anchor_y, lx, ly
+                # Enforce ordering and minimum size
+                x1, x2 = min(x1, x2), max(x1, x2)
+                y1, y2 = min(y1, y2), max(y1, y2)
+                if x2 - x1 < 6:
+                    mid = (x1 + x2) / 2
+                    x1, x2 = mid - 3, mid + 3
+                if y2 - y1 < 6:
+                    mid = (y1 + y2) / 2
+                    y1, y2 = mid - 3, mid + 3
+                shape["coords"] = [x1, y1, x2, y2]
+                self._region_redraw_overlay()
+            return
+
+        # Draw mode — existing rubberband logic
         tool = self.region_tool.get()
-        if tool == "rect":
-            if self.region_drag_start:
-                x1, y1 = self.region_drag_start
-                if self.region_rubber_id:
-                    self.region_canvas.delete(self.region_rubber_id)
-                self.region_rubber_id = self.region_canvas.create_rectangle(x1, y1, event.x, event.y, outline="#ff4444", dash=(4, 2))
-        elif tool == "ellipse":
-            if self.region_drag_start:
-                x1, y1 = self.region_drag_start
-                if self.region_rubber_id:
-                    self.region_canvas.delete(self.region_rubber_id)
-                self.region_rubber_id = self.region_canvas.create_oval(x1, y1, event.x, event.y, outline="#ff4444", dash=(4, 2))
+        if self.region_drag_start:
+            x1, y1 = self.region_drag_start
+            if self.region_rubber_id:
+                self.region_canvas.delete(self.region_rubber_id)
+            if tool == "rect":
+                self.region_rubber_id = self.region_canvas.create_rectangle(
+                    x1, y1, event.x, event.y, outline="#ff4444", dash=(4, 2))
+            elif tool == "ellipse":
+                self.region_rubber_id = self.region_canvas.create_oval(
+                    x1, y1, event.x, event.y, outline="#ff4444", dash=(4, 2))
 
     def _region_canvas_release(self, event):
+        if self.region_drag_mode == "move":
+            self.region_drag_mode = None
+            self._region_move_snapshot = None
+            self.region_drag_start = None
+            self._region_redraw_overlay()
+            self._region_update_button_states()
+            return
+
+        if self.region_drag_mode == "rotate":
+            self.region_drag_mode = None
+            self.region_drag_start = None
+            self._region_redraw_overlay()
+            self._region_update_button_states()
+            return
+
+        if self.region_drag_mode == "resize":
+            self.region_drag_mode = None
+            self.region_drag_start = None
+            self._region_resize_corner = None
+            self._region_redraw_overlay()
+            self._region_update_button_states()
+            return
+
+        # Draw mode — existing logic
         tool = self.region_tool.get()
         if tool in ("rect", "ellipse") and self.region_drag_start:
             x1, y1 = self.region_drag_start
             x2, y2 = event.x, event.y
             if abs(x2 - x1) > 3 and abs(y2 - y1) > 3:
-                self.region_shapes.append({"tool": tool, "coords": [x1, y1, x2, y2]})
+                self.region_shapes.append({"tool": tool, "coords": [x1, y1, x2, y2], "rotation": 0})
             if self.region_rubber_id:
                 self.region_canvas.delete(self.region_rubber_id)
                 self.region_rubber_id = None
             self.region_drag_start = None
             self._region_redraw_overlay()
+        self.region_drag_mode = None
         self._region_update_button_states()
 
     def _region_canvas_double_click(self, event):
@@ -1755,7 +2026,8 @@ class App:
         pass
 
     def _region_redraw_overlay(self):
-        """Redraw the red semi-transparent mask overlay on the canvas."""
+        """Redraw the red semi-transparent mask overlay on the canvas.
+        Supports rotated shapes via OpenCV; falls back to PIL for axis-aligned."""
         try:
             from PIL import Image, ImageDraw, ImageTk
         except Exception:
@@ -1767,37 +2039,212 @@ class App:
         if self._region_cached_pil is None or self._region_cached_pil_path != image_path:
             self._region_cached_pil = Image.open(image_path).convert("RGBA")
             self._region_cached_pil_path = image_path
-        img = self._region_cached_pil.copy()
+        img = self._region_cached_pil
         cw = self.region_canvas.winfo_width() or 600
         ch = self.region_canvas.winfo_height() or 500
         display_size = min(cw - 4, ch - 4, 600)
         ratio = display_size / max(img.width, img.height)
         new_w = max(1, int(img.width * ratio))
         new_h = max(1, int(img.height * ratio))
-        img = img.resize((new_w, new_h), Image.LANCZOS)
+        # Use cached display-size image when canvas size hasn't changed
+        cur_display = (new_w, new_h)
+        if self._region_cached_display_pil is not None and self._region_cached_display_size == cur_display:
+            img = self._region_cached_display_pil
+        else:
+            img = img.copy().resize((new_w, new_h), Image.LANCZOS)
+            self._region_cached_display_pil = img
+            self._region_cached_display_size = cur_display
         # Draw red overlay for each shape
         overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay)
-        for shape in self.region_shapes:
-            tool = shape.get("tool", "")
-            coords = shape.get("coords", [])
-            if tool in ("rect", "ellipse") and len(coords) >= 4:
-                x1, y1, x2, y2 = [int(c) for c in coords[:4]]
-                x1, x2 = sorted([x1, x2])
-                y1, y2 = sorted([y1, y2])
+        # Try OpenCV for rotated shapes
+        loaded = load_cv2()
+        if loaded:
+            cv2, np = loaded
+            # Build overlay as numpy (H, W, 4) uint8
+            overlay_np = np.zeros((new_h, new_w, 4), dtype=np.uint8)
+            for i, shape in enumerate(self.region_shapes):
+                tool = shape.get("tool", "")
+                coords = shape.get("coords", [])
+                if tool not in ("rect", "ellipse") or len(coords) < 4:
+                    continue
+                x1, y1, x2, y2 = [float(c) for c in coords[:4]]
+                if x1 > x2:
+                    x1, x2 = x2, x1
+                if y1 > y2:
+                    y1, y2 = y2, y1
+                cx = (x1 + x2) / 2.0
+                cy = (y1 + y2) / 2.0
+                hw = (x2 - x1) / 2.0
+                hh = (y2 - y1) / 2.0
+                rotation = shape.get("rotation", 0)
+                is_selected = (i == self.region_selected_index)
+                fill_color = (0, 0, 255, 100) if is_selected else (0, 0, 255, 80)  # BGR+A in cv2 space → RGBA later
+                # Note: cv2 uses BGR order, we'll convert later
                 if tool == "rect":
-                    draw.rectangle([x1, y1, x2, y2], fill=(255, 0, 0, 80))
-                else:
-                    draw.ellipse([x1, y1, x2, y2], fill=(255, 0, 0, 80))
+                    if rotation != 0:
+                        # Rotated rectangle via boxPoints
+                        rect = ((cx, cy), (hw * 2, hh * 2), rotation)
+                        box = cv2.boxPoints(rect).astype(np.int32)
+                        cv2.fillPoly(overlay_np, [box], fill_color)
+                    else:
+                        cv2.rectangle(overlay_np,
+                                      (int(x1), int(y1)), (int(x2), int(y2)),
+                                      fill_color, thickness=-1)
+                else:  # ellipse
+                    # cv2.ellipse: axes are (semi-major, semi-minor), use (hw, hh)
+                    cv2.ellipse(overlay_np,
+                                (int(cx), int(cy)), (int(hw), int(hh)),
+                                rotation, 0.0, 360.0,
+                                fill_color, thickness=-1)
+                # Draw selection highlight outline
+                if is_selected:
+                    outline_color = (255, 255, 0, 255)  # Yellow outline
+                    if tool == "rect" and rotation != 0:
+                        rect = ((cx, cy), (hw * 2, hh * 2), rotation)
+                        box = cv2.boxPoints(rect).astype(np.int32)
+                        cv2.polylines(overlay_np, [box], isClosed=True, color=outline_color, thickness=2)
+                    elif tool == "rect":
+                        cv2.rectangle(overlay_np, (int(x1), int(y1)), (int(x2), int(y2)),
+                                      outline_color, thickness=2)
+                    else:
+                        cv2.ellipse(overlay_np, (int(cx), int(cy)), (int(hw), int(hh)),
+                                    rotation, 0.0, 360.0, outline_color, thickness=2)
+            # Convert numpy (BGRA) → PIL RGBA overlay
+            # cv2 uses BGRA, PIL uses RGBA: swap R and B channels
+            overlay_np_rgba = np.zeros_like(overlay_np)
+            overlay_np_rgba[:, :, 0] = overlay_np[:, :, 2]  # R ← B
+            overlay_np_rgba[:, :, 1] = overlay_np[:, :, 1]  # G ← G
+            overlay_np_rgba[:, :, 2] = overlay_np[:, :, 0]  # B ← R
+            overlay_np_rgba[:, :, 3] = overlay_np[:, :, 3]  # A ← A
+            overlay = Image.fromarray(overlay_np_rgba, "RGBA")
+        else:
+            # Fallback: PIL axis-aligned only (legacy path)
+            draw = ImageDraw.Draw(overlay)
+            for i, shape in enumerate(self.region_shapes):
+                tool = shape.get("tool", "")
+                coords = shape.get("coords", [])
+                if tool in ("rect", "ellipse") and len(coords) >= 4:
+                    x1, y1, x2, y2 = [int(c) for c in coords[:4]]
+                    x1, x2 = sorted([x1, x2])
+                    y1, y2 = sorted([y1, y2])
+                    is_selected = (i == self.region_selected_index)
+                    fill = (255, 0, 0, 100) if is_selected else (255, 0, 0, 80)
+                    if tool == "rect":
+                        draw.rectangle([x1, y1, x2, y2], fill=fill)
+                    else:
+                        draw.ellipse([x1, y1, x2, y2], fill=fill)
+                    if is_selected:
+                        draw.rectangle([x1, y1, x2, y2], outline=(255, 255, 0), width=2)
         img = Image.alpha_composite(img, overlay)
         self.region_canvas_image_ref = ImageTk.PhotoImage(img)
         self.region_canvas.delete("all")
         self.region_canvas.create_image(2, 2, anchor="nw", image=self.region_canvas_image_ref)
 
+        # Draw rotation handle on canvas for the selected shape
+        if self.region_selected_index is not None and self.region_selected_index < len(self.region_shapes):
+            shape = self.region_shapes[self.region_selected_index]
+            coords = shape.get("coords", [])
+            if len(coords) >= 4:
+                import math
+                cx = (coords[0] + coords[2]) / 2.0
+                cy = (coords[1] + coords[3]) / 2.0
+                hh = abs(coords[3] - coords[1]) / 2.0
+                rotation = shape.get("rotation", 0)
+                rad = math.radians(rotation)
+                handle_offset = 14
+                hx = cx + math.sin(rad) * (hh + handle_offset)
+                hy = cy - math.cos(rad) * (hh + handle_offset)
+                r = 5
+                lid = self.region_canvas.create_line(cx, cy, hx, hy, fill="#ffff00", width=1, tags=("rot_handle",))
+                cid = self.region_canvas.create_oval(hx - r, hy - r, hx + r, hy + r,
+                                                     fill="#ffff00", outline="#000000", width=1,
+                                                     tags=("rot_handle",))
+                self._region_handle_ids = [lid, cid]
+
+                # Draw corner resize handles
+                hw = abs(coords[2] - coords[0]) / 2.0
+                # 4 unrotated corners: tl, tr, bl, br
+                corners = [
+                    (coords[0], coords[1]),
+                    (coords[2], coords[1]),
+                    (coords[0], coords[3]),
+                    (coords[2], coords[3]),
+                ]
+                corner_tags = ("rsz_tl", "rsz_tr", "rsz_bl", "rsz_br")
+                rs = 3  # half-size of resize handle square
+                for i, (ux, uy) in enumerate(corners):
+                    # Rotate around center
+                    dx = ux - cx
+                    dy = uy - cy
+                    rx = cx + dx * math.cos(rad) - dy * math.sin(rad)
+                    ry = cy + dx * math.sin(rad) + dy * math.cos(rad)
+                    rid = self.region_canvas.create_rectangle(
+                        rx - rs, ry - rs, rx + rs, ry + rs,
+                        fill="#ffffff", outline="#000000", width=1,
+                        tags=("resize_handle", corner_tags[i]),
+                    )
+                    self._region_handle_ids.append(rid)
+
+    def _region_on_rotation_changed(self, _value=None):
+        """Callback when the rotation slider is moved."""
+        if self.region_drag_mode == "rotate":
+            return  # Canvas handle manages rotation; avoid double update
+        if self.region_selected_index is not None and self.region_selected_index < len(self.region_shapes):
+            angle = int(float(self.region_rotation_var.get()))
+            self.region_shapes[self.region_selected_index]["rotation"] = angle
+            self.region_rotation_display.set(f"{angle}°")
+            self._region_redraw_overlay()
+
+    def _region_rotation_entry_apply(self, _event=None):
+        """Apply the angle typed into the rotation entry box."""
+        if self.region_selected_index is None:
+            return
+        try:
+            raw = self.region_rotation_display.get().replace("°", "").strip()
+            angle = int(float(raw))
+            angle = max(-180, min(180, angle))
+            self.region_rotation_var.set(angle)
+        except (ValueError, TypeError):
+            # Restore to current shape's rotation on invalid input
+            current = self.region_shapes[self.region_selected_index].get("rotation", 0)
+            self.region_rotation_display.set(f"{current}°")
+
+    def _region_on_mousewheel(self, event):
+        """Scroll wheel rotates the selected shape by +/-5 degrees."""
+        if self.region_selected_index is None:
+            return
+        if self.region_selected_index >= len(self.region_shapes):
+            return
+        # Determine direction: Windows uses event.delta, Linux uses event.num
+        if hasattr(event, "delta"):
+            delta = 1 if event.delta > 0 else -1
+        elif hasattr(event, "num"):
+            delta = 1 if event.num == 4 else -1
+        else:
+            return
+        shape = self.region_shapes[self.region_selected_index]
+        current = shape.get("rotation", 0)
+        step = 1 if (event.state & 0x0001) else 5  # Shift held = fine (1 deg), else coarse (5 deg)
+        new_angle = current + delta * step
+        # Clamp to [-180, 180]
+        new_angle = max(-180, min(180, new_angle))
+        shape["rotation"] = new_angle
+        self.region_rotation_var.set(new_angle)
+        self.region_rotation_display.set(f"{new_angle}°")
+        self._region_redraw_overlay()
+
     def _region_clear_mask(self):
         self.region_shapes.clear()
         self.region_poly_points.clear()
         self.region_drag_start = None
+        self.region_drag_mode = None
+        self._region_move_snapshot = None
+        self._region_resize_corner = None
+        self.region_selected_index = None
+        self.region_rotation_var.set(0)
+        self.region_rotation_display.set("0°")
+        self.region_rotation_slider.config(state="disabled")
+        self.region_rotation_label.config(state="disabled")
         if self.region_rubber_id:
             self.region_canvas.delete(self.region_rubber_id)
             self.region_rubber_id = None
